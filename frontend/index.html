@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Upload System</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>PDF Upload System</h1>
+
+        <form id="uploadForm">
+            <div class="form-group">
+                <label for="pdfFile">Upload PDF:</label>
+                <input type="file" id="pdfFile" name="pdfFile" accept=".pdf" required>
+                <small class="file-info" id="fileInfo"></small>
+            </div>
+
+            <div class="form-group">
+                <label for="regex">Regex Pattern:</label>
+                <input type="text" id="regex" name="regex" placeholder="e.g., ^test.*" required>
+            </div>
+
+            <div class="form-group">
+                <label for="url">URL:</label>
+                <input type="text" id="url" name="url" placeholder="https://example.com" required>
+            </div>
+
+            <button type="submit" id="submitBtn">Submit</button>
+        </form>
+
+        <div id="successMessage" class="success-message hidden">
+            <h2>Success!</h2>
+            <p>File uploaded: <strong id="uploadedFilename"></strong></p>
+        </div>
+
+        <div id="errorMessage" class="error-message hidden">
+            <h2>Error</h2>
+            <p id="errorText"></p>
+        </div>
+
+        <div id="loadingMessage" class="loading-message hidden">
+            <div class="spinner"></div>
+            <p>Uploading...</p>
+        </div>
+    </div>
+
+    <script>
+        // API Gateway URL - will be replaced after deployment
+        const API_URL = '{{API_URL}}';
+
+        const form = document.getElementById('uploadForm');
+        const pdfFileInput = document.getElementById('pdfFile');
+        const regexInput = document.getElementById('regex');
+        const urlInput = document.getElementById('url');
+        const submitBtn = document.getElementById('submitBtn');
+        const successMessage = document.getElementById('successMessage');
+        const errorMessage = document.getElementById('errorMessage');
+        const loadingMessage = document.getElementById('loadingMessage');
+        const uploadedFilename = document.getElementById('uploadedFilename');
+        const errorText = document.getElementById('errorText');
+        const fileInfo = document.getElementById('fileInfo');
+
+        // Show file info when file is selected
+        pdfFileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const sizeInMB = (file.size / (1024 * 1024)).toFixed(2);
+                fileInfo.textContent = `Selected: ${file.name} (${sizeInMB} MB)`;
+            } else {
+                fileInfo.textContent = '';
+            }
+        });
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // Hide previous messages
+            successMessage.classList.add('hidden');
+            errorMessage.classList.add('hidden');
+            loadingMessage.classList.remove('hidden');
+            submitBtn.disabled = true;
+
+            try {
+                const file = pdfFileInput.files[0];
+                if (!file) {
+                    throw new Error('Please select a PDF file');
+                }
+
+                const regex = regexInput.value.trim();
+                const url = urlInput.value.trim();
+
+                // Step 1: Get presigned upload URL
+                console.log('Getting presigned URL...');
+                const uploadUrlResponse = await fetch(`${API_URL}upload-url`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        filename: file.name
+                    })
+                });
+
+                if (!uploadUrlResponse.ok) {
+                    throw new Error('Failed to get upload URL');
+                }
+
+                const uploadData = await uploadUrlResponse.json();
+                console.log('Got presigned URL');
+
+                // Step 2: Upload file directly to S3
+                console.log('Uploading to S3...');
+                const formData = new FormData();
+
+                // Add all fields from presigned post
+                Object.keys(uploadData.fields).forEach(key => {
+                    formData.append(key, uploadData.fields[key]);
+                });
+
+                // Add file last
+                formData.append('file', file);
+
+                const s3Response = await fetch(uploadData.uploadUrl, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!s3Response.ok) {
+                    throw new Error('Failed to upload file to S3');
+                }
+                console.log('File uploaded to S3');
+
+                // Step 3: Submit form data to API
+                console.log('Submitting form...');
+                const submitResponse = await fetch(`${API_URL}submit`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        filename: file.name,
+                        regex: regex,
+                        url: url
+                    })
+                });
+
+                if (!submitResponse.ok) {
+                    throw new Error('Failed to submit form');
+                }
+
+                const result = await submitResponse.json();
+                console.log('Form submitted successfully', result);
+
+                // Show success message
+                loadingMessage.classList.add('hidden');
+                uploadedFilename.textContent = result.filename;
+                successMessage.classList.remove('hidden');
+
+                // Reset form
+                form.reset();
+                fileInfo.textContent = '';
+
+            } catch (error) {
+                console.error('Error:', error);
+                loadingMessage.classList.add('hidden');
+                errorText.textContent = error.message;
+                errorMessage.classList.remove('hidden');
+            } finally {
+                submitBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
