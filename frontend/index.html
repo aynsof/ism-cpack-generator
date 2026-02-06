@@ -31,8 +31,8 @@
         </form>
 
         <div id="successMessage" class="success-message hidden">
-            <h2>Success!</h2>
-            <p>File uploaded: <strong id="uploadedFilename"></strong></p>
+            <h2 id="successTitle">Success!</h2>
+            <p id="successText"></p>
         </div>
 
         <div id="errorMessage" class="error-message hidden">
@@ -42,7 +42,7 @@
 
         <div id="loadingMessage" class="loading-message hidden">
             <div class="spinner"></div>
-            <p>Uploading...</p>
+            <p id="loadingText">In Progress...</p>
         </div>
     </div>
 
@@ -58,7 +58,8 @@
         const successMessage = document.getElementById('successMessage');
         const errorMessage = document.getElementById('errorMessage');
         const loadingMessage = document.getElementById('loadingMessage');
-        const uploadedFilename = document.getElementById('uploadedFilename');
+        const successTitle = document.getElementById('successTitle');
+        const successText = document.getElementById('successText');
         const errorText = document.getElementById('errorText');
         const fileInfo = document.getElementById('fileInfo');
 
@@ -72,6 +73,65 @@
                 fileInfo.textContent = '';
             }
         });
+
+        // Poll job status until completion
+        async function pollJobStatus(jobId, filename) {
+            const maxAttempts = 60; // Poll for up to 3 minutes (60 * 3 seconds)
+            let attempts = 0;
+
+            while (attempts < maxAttempts) {
+                try {
+                    const statusResponse = await fetch(`${API_URL}status/${jobId}`, {
+                        method: 'GET',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    });
+
+                    if (!statusResponse.ok) {
+                        throw new Error('Failed to get job status');
+                    }
+
+                    const status = await statusResponse.json();
+                    console.log('Job status:', status);
+
+                    if (status.status === 'completed') {
+                        // Success!
+                        loadingMessage.classList.add('hidden');
+                        successTitle.textContent = 'Success!';
+                        successText.textContent = `File: ${status.filename} - Found ${status.matches_found} matches`;
+                        successMessage.classList.remove('hidden');
+
+                        // Reset form
+                        form.reset();
+                        fileInfo.textContent = '';
+                        submitBtn.disabled = false;
+                        return;
+                    } else if (status.status === 'failed') {
+                        // Failed
+                        throw new Error(status.error || 'Processing failed');
+                    }
+
+                    // Still processing, wait and try again
+                    await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds
+                    attempts++;
+
+                } catch (error) {
+                    console.error('Error polling status:', error);
+                    loadingMessage.classList.add('hidden');
+                    errorText.textContent = error.message;
+                    errorMessage.classList.remove('hidden');
+                    submitBtn.disabled = false;
+                    return;
+                }
+            }
+
+            // Timeout
+            loadingMessage.classList.add('hidden');
+            errorText.textContent = 'Processing timeout. Please check status later.';
+            errorMessage.classList.remove('hidden');
+            submitBtn.disabled = false;
+        }
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -110,6 +170,9 @@
                 const uploadData = await uploadUrlResponse.json();
                 console.log('Got presigned URL');
 
+                // Store the S3 key for later use
+                const s3Key = uploadData.key;
+
                 // Step 2: Upload file directly to S3
                 console.log('Uploading to S3...');
                 const formData = new FormData();
@@ -142,7 +205,8 @@
                     body: JSON.stringify({
                         filename: file.name,
                         regex: regex,
-                        url: url
+                        url: url,
+                        s3_key: s3Key
                     })
                 });
 
@@ -153,14 +217,16 @@
                 const result = await submitResponse.json();
                 console.log('Form submitted successfully', result);
 
-                // Show success message
-                loadingMessage.classList.add('hidden');
-                uploadedFilename.textContent = result.filename;
-                successMessage.classList.remove('hidden');
+                // Get job ID and start polling
+                const jobId = result.job_id;
+                if (!jobId) {
+                    throw new Error('No job ID returned');
+                }
 
-                // Reset form
-                form.reset();
-                fileInfo.textContent = '';
+                console.log('Polling for job status:', jobId);
+
+                // Poll for job completion
+                await pollJobStatus(jobId, file.name);
 
             } catch (error) {
                 console.error('Error:', error);

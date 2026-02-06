@@ -2,8 +2,13 @@ import json
 import os
 import boto3
 from botocore.config import Config
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
+import re
+from PyPDF2 import PdfReader
+from io import BytesIO
+import time
+from decimal import Decimal
 
 # Configure S3 client with regional endpoint
 s3_config = Config(
@@ -11,12 +16,31 @@ s3_config = Config(
     s3={'addressing_style': 'path'}
 )
 s3_client = boto3.client('s3', config=s3_config)
+lambda_client = boto3.client('lambda')
 BUCKET_NAME = os.environ['BUCKET_NAME']
+
+# Configure DynamoDB clients
+dynamodb = boto3.resource('dynamodb')
+MATCHES_TABLE_NAME = os.environ['MATCHES_TABLE_NAME']
+JOBS_TABLE_NAME = os.environ['JOBS_TABLE_NAME']
+matches_table = dynamodb.Table(MATCHES_TABLE_NAME)
+jobs_table = dynamodb.Table(JOBS_TABLE_NAME)
+
+
+def decimal_to_number(obj):
+    """Convert Decimal objects to int or float for JSON serialization"""
+    if isinstance(obj, Decimal):
+        return int(obj) if obj % 1 == 0 else float(obj)
+    return obj
 
 
 def handler(event, context):
     """Main Lambda handler that routes requests to appropriate functions"""
     print(f"Event: {json.dumps(event)}")
+
+    # Check if this is an async invocation for processing
+    if event.get('async_processing'):
+        return process_pdf_job(event)
 
     path = event.get('path', '')
     http_method = event.get('httpMethod', '')
@@ -42,6 +66,8 @@ def handler(event, context):
             return get_upload_url(event, headers)
         elif path == '/submit' and http_method == 'POST':
             return submit_form(event, headers)
+        elif path.startswith('/status/') and http_method == 'GET':
+            return get_job_status(event, headers)
         else:
             return {
                 'statusCode': 404,
@@ -100,18 +126,23 @@ def get_upload_url(event, headers):
 
     except Exception as e:
         print(f"Error generating upload URL: {str(e)}")
-        raise
+        return {
+            'statusCode': 500,
+            'headers': headers,
+            'body': json.dumps({'error': f'Failed to generate upload URL: {str(e)}'})
+        }
 
 
 def submit_form(event, headers):
-    """Process form submission and return filename"""
+    """Create a job and trigger async PDF processing"""
     try:
         # Parse request body
         body = json.loads(event['body'])
 
         filename = body.get('filename', '')
-        regex = body.get('regex', '')
+        regex_pattern = body.get('regex', '')
         url = body.get('url', '')
+        s3_key = body.get('s3_key', '')
 
         # Validate inputs
         if not filename:
@@ -121,19 +152,265 @@ def submit_form(event, headers):
                 'body': json.dumps({'error': 'Filename is required'})
             }
 
-        # Log the submission
-        print(f"Form submitted - Filename: {filename}, Regex: {regex}, URL: {url}")
+        if not regex_pattern:
+            return {
+                'statusCode': 400,
+                'headers': headers,
+                'body': json.dumps({'error': 'Regex pattern is required'})
+            }
 
-        # Return success with filename
+        if not s3_key:
+            return {
+                'statusCode': 400,
+                'headers': headers,
+                'body': json.dumps({'error': 'S3 key is required'})
+            }
+
+        # Validate regex
+        try:
+            re.compile(regex_pattern)
+        except re.error as e:
+            return {
+                'statusCode': 400,
+                'headers': headers,
+                'body': json.dumps({'error': f'Invalid regex pattern: {str(e)}'})
+            }
+
+        # Generate job ID
+        job_id = str(uuid.uuid4())
+        timestamp = datetime.now().isoformat()
+        ttl = int((datetime.now() + timedelta(hours=24)).timestamp())
+
+        # Create job record in DynamoDB
+        jobs_table.put_item(
+            Item={
+                'job_id': job_id,
+                'status': 'processing',
+                'filename': filename,
+                'regex': regex_pattern,
+                'url': url,
+                's3_key': s3_key,
+                'created_at': timestamp,
+                'ttl': ttl
+            }
+        )
+
+        print(f"Created job {job_id} for PDF: {filename}")
+
+        # Invoke Lambda asynchronously for processing
+        lambda_client.invoke(
+            FunctionName=os.environ['AWS_LAMBDA_FUNCTION_NAME'],
+            InvocationType='Event',  # Async invocation
+            Payload=json.dumps({
+                'async_processing': True,
+                'job_id': job_id,
+                'filename': filename,
+                'regex': regex_pattern,
+                'url': url,
+                's3_key': s3_key
+            })
+        )
+
+        print(f"Triggered async processing for job {job_id}")
+
+        # Return job ID immediately
         return {
             'statusCode': 200,
             'headers': headers,
             'body': json.dumps({
-                'filename': filename,
-                'status': 'success'
+                'status': 'In Progress...',
+                'job_id': job_id,
+                'message': 'PDF processing started'
             })
         }
 
     except Exception as e:
-        print(f"Error processing form: {str(e)}")
-        raise
+        print(f"Error creating job: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': headers,
+            'body': json.dumps({'error': f'Internal server error: {str(e)}'})
+        }
+
+
+def process_pdf_job(event):
+    """Background job to process PDF and store matches"""
+    job_id = event['job_id']
+    filename = event['filename']
+    regex_pattern = event['regex']
+    url = event['url']
+    s3_key = event['s3_key']
+
+    print(f"Starting async processing for job {job_id}")
+
+    try:
+        # Update job status to processing
+        jobs_table.update_item(
+            Key={'job_id': job_id},
+            UpdateExpression='SET #status = :status, updated_at = :updated',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={
+                ':status': 'processing',
+                ':updated': datetime.now().isoformat()
+            }
+        )
+
+        # Compile regex
+        compiled_regex = re.compile(regex_pattern)
+
+        # Download PDF from S3
+        print(f"Downloading PDF from S3: {s3_key}")
+        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
+        pdf_content = response['Body'].read()
+
+        # Extract text from PDF
+        print("Extracting text from PDF")
+        pdf_file = BytesIO(pdf_content)
+        pdf_reader = PdfReader(pdf_file)
+
+        # Extract text from all pages
+        full_text = ""
+        for page_num, page in enumerate(pdf_reader.pages):
+            text = page.extract_text()
+            full_text += text + "\n"
+
+        print(f"Extracted {len(full_text)} characters from {len(pdf_reader.pages)} pages")
+
+        # Find matching lines
+        print(f"Searching for matches with regex: {regex_pattern}")
+        lines = full_text.split('\n')
+        matches_found = 0
+        timestamp = datetime.now().isoformat()
+
+        for line_number, line in enumerate(lines, start=1):
+            # Skip empty lines
+            if not line.strip():
+                continue
+
+            # Check if line matches regex
+            if compiled_regex.search(line):
+                matches_found += 1
+
+                # Store match in DynamoDB
+                try:
+                    matches_table.put_item(
+                        Item={
+                            'id': str(uuid.uuid4()),
+                            'job_id': job_id,
+                            'matched_line': line,
+                            'regex': regex_pattern,
+                            'source_file': filename,
+                            's3_key': s3_key,
+                            'url': url,
+                            'timestamp': timestamp,
+                            'line_number': line_number
+                        }
+                    )
+                except Exception as e:
+                    print(f"Error storing match in DynamoDB: {str(e)}")
+                    # Continue processing other matches
+
+        print(f"Found and stored {matches_found} matches for job {job_id}")
+
+        # Update job status to completed
+        jobs_table.update_item(
+            Key={'job_id': job_id},
+            UpdateExpression='SET #status = :status, matches_found = :matches, completed_at = :completed',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={
+                ':status': 'completed',
+                ':matches': matches_found,
+                ':completed': datetime.now().isoformat()
+            }
+        )
+
+        print(f"Job {job_id} completed successfully")
+        return {'statusCode': 200, 'body': json.dumps({'job_id': job_id, 'matches_found': matches_found})}
+
+    except Exception as e:
+        print(f"Error processing job {job_id}: {str(e)}")
+
+        # Update job status to failed
+        try:
+            jobs_table.update_item(
+                Key={'job_id': job_id},
+                UpdateExpression='SET #status = :status, error_message = :error, failed_at = :failed',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={
+                    ':status': 'failed',
+                    ':error': str(e),
+                    ':failed': datetime.now().isoformat()
+                }
+            )
+        except Exception as update_error:
+            print(f"Failed to update job status: {str(update_error)}")
+
+        return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+
+
+def get_job_status(event, headers):
+    """Get the status of a PDF processing job"""
+    try:
+        # Extract job_id from path
+        path = event.get('path', '')
+        path_params = event.get('pathParameters', {})
+        job_id = path_params.get('job_id') if path_params else None
+
+        if not job_id:
+            # Try to extract from path manually
+            parts = path.split('/')
+            if len(parts) >= 3 and parts[1] == 'status':
+                job_id = parts[2]
+
+        if not job_id:
+            return {
+                'statusCode': 400,
+                'headers': headers,
+                'body': json.dumps({'error': 'Job ID is required'})
+            }
+
+        print(f"Checking status for job {job_id}")
+
+        # Get job from DynamoDB
+        response = jobs_table.get_item(Key={'job_id': job_id})
+
+        if 'Item' not in response:
+            return {
+                'statusCode': 404,
+                'headers': headers,
+                'body': json.dumps({'error': 'Job not found'})
+            }
+
+        job = response['Item']
+        status = job.get('status', 'unknown')
+
+        result = {
+            'job_id': job_id,
+            'status': status,
+            'filename': job.get('filename', ''),
+            'created_at': job.get('created_at', '')
+        }
+
+        if status == 'completed':
+            result['matches_found'] = decimal_to_number(job.get('matches_found', 0))
+            result['completed_at'] = job.get('completed_at', '')
+            result['message'] = 'Success!'
+        elif status == 'failed':
+            result['error'] = job.get('error_message', 'Unknown error')
+            result['failed_at'] = job.get('failed_at', '')
+        elif status == 'processing':
+            result['message'] = 'In Progress...'
+
+        return {
+            'statusCode': 200,
+            'headers': headers,
+            'body': json.dumps(result)
+        }
+
+    except Exception as e:
+        print(f"Error getting job status: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': headers,
+            'body': json.dumps({'error': f'Internal server error: {str(e)}'})
+        }

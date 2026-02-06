@@ -10,6 +10,7 @@ from aws_cdk import (
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
     aws_iam as iam,
+    aws_dynamodb as dynamodb,
 )
 from constructs import Construct
 
@@ -36,6 +37,29 @@ class PdfUploadSystemStack(Stack):
             auto_delete_objects=True
         )
 
+        # DynamoDB table for storing regex matches
+        matches_table = dynamodb.Table(
+            self, "PdfMatchesTable",
+            partition_key=dynamodb.Attribute(
+                name="id",
+                type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY
+        )
+
+        # DynamoDB table for tracking job status
+        jobs_table = dynamodb.Table(
+            self, "JobsTable",
+            partition_key=dynamodb.Attribute(
+                name="job_id",
+                type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            time_to_live_attribute="ttl"  # Auto-delete old jobs after 24 hours
+        )
+
         # Lambda function
         pdf_lambda = lambda_.Function(
             self, "PdfUploadHandler",
@@ -43,15 +67,30 @@ class PdfUploadSystemStack(Stack):
             handler="handler.handler",
             code=lambda_.Code.from_asset("lambda"),
             environment={
-                "BUCKET_NAME": pdf_bucket.bucket_name
+                "BUCKET_NAME": pdf_bucket.bucket_name,
+                "MATCHES_TABLE_NAME": matches_table.table_name,
+                "JOBS_TABLE_NAME": jobs_table.table_name
             },
-            timeout=Duration.seconds(30),
-            memory_size=256
+            timeout=Duration.seconds(90),
+            memory_size=512
         )
 
         # Grant Lambda permissions to S3
         pdf_bucket.grant_put(pdf_lambda)
         pdf_bucket.grant_read(pdf_lambda)
+
+        # Grant Lambda permissions to DynamoDB
+        matches_table.grant_read_write_data(pdf_lambda)
+        jobs_table.grant_read_write_data(pdf_lambda)
+
+        # Grant Lambda permission to invoke itself asynchronously
+        # Using wildcard to avoid circular dependency
+        pdf_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=['lambda:InvokeFunction'],
+                resources=['*']  # Or restrict to same account/region if needed
+            )
+        )
 
         # API Gateway
         api = apigateway.RestApi(
@@ -80,6 +119,11 @@ class PdfUploadSystemStack(Stack):
 
         submit_resource = api.root.add_resource("submit")
         submit_resource.add_method("POST", lambda_integration)
+
+        # Status endpoint with path parameter
+        status_resource = api.root.add_resource("status")
+        job_id_resource = status_resource.add_resource("{job_id}")
+        job_id_resource.add_method("GET", lambda_integration)
 
         # S3 Bucket for frontend
         frontend_bucket = s3.Bucket(
@@ -140,6 +184,8 @@ class PdfUploadSystemStack(Stack):
         CfnOutput(self, "ApiUrl", value=api.url, description="API Gateway URL")
         CfnOutput(self, "CloudFrontUrl", value=f"https://{distribution.domain_name}", description="CloudFront URL")
         CfnOutput(self, "PdfBucketName", value=pdf_bucket.bucket_name, description="PDF Storage Bucket Name")
+        CfnOutput(self, "MatchesTableName", value=matches_table.table_name, description="DynamoDB Matches Table Name")
+        CfnOutput(self, "JobsTableName", value=jobs_table.table_name, description="DynamoDB Jobs Table Name")
 
     def _inject_api_url(self, file_path: str, api_url: str) -> str:
         """Read HTML file and inject API URL"""
