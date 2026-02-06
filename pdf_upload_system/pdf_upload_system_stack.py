@@ -19,9 +19,9 @@ class PdfUploadSystemStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # S3 Bucket for PDF storage
-        pdf_bucket = s3.Bucket(
-            self, "PdfStorageBucket",
+        # S3 Bucket for JSON storage
+        json_bucket = s3.Bucket(
+            self, "JsonStorageBucket",
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             cors=[
@@ -37,9 +37,9 @@ class PdfUploadSystemStack(Stack):
             auto_delete_objects=True
         )
 
-        # DynamoDB table for storing regex matches
-        matches_table = dynamodb.Table(
-            self, "PdfMatchesTable",
+        # DynamoDB table for storing ISM controls
+        controls_table = dynamodb.Table(
+            self, "ControlsTable",
             partition_key=dynamodb.Attribute(
                 name="id",
                 type=dynamodb.AttributeType.STRING
@@ -61,14 +61,14 @@ class PdfUploadSystemStack(Stack):
         )
 
         # Lambda function
-        pdf_lambda = lambda_.Function(
-            self, "PdfUploadHandler",
+        json_lambda = lambda_.Function(
+            self, "JsonUploadHandler",
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="handler.handler",
             code=lambda_.Code.from_asset("lambda"),
             environment={
-                "BUCKET_NAME": pdf_bucket.bucket_name,
-                "MATCHES_TABLE_NAME": matches_table.table_name,
+                "BUCKET_NAME": json_bucket.bucket_name,
+                "CONTROLS_TABLE_NAME": controls_table.table_name,
                 "JOBS_TABLE_NAME": jobs_table.table_name
             },
             timeout=Duration.seconds(90),
@@ -76,16 +76,16 @@ class PdfUploadSystemStack(Stack):
         )
 
         # Grant Lambda permissions to S3
-        pdf_bucket.grant_put(pdf_lambda)
-        pdf_bucket.grant_read(pdf_lambda)
+        json_bucket.grant_put(json_lambda)
+        json_bucket.grant_read(json_lambda)
 
         # Grant Lambda permissions to DynamoDB
-        matches_table.grant_read_write_data(pdf_lambda)
-        jobs_table.grant_read_write_data(pdf_lambda)
+        controls_table.grant_read_write_data(json_lambda)
+        jobs_table.grant_read_write_data(json_lambda)
 
         # Grant Lambda permission to invoke itself asynchronously
         # Using wildcard to avoid circular dependency
-        pdf_lambda.add_to_role_policy(
+        json_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 actions=['lambda:InvokeFunction'],
                 resources=['*']  # Or restrict to same account/region if needed
@@ -94,9 +94,9 @@ class PdfUploadSystemStack(Stack):
 
         # API Gateway
         api = apigateway.RestApi(
-            self, "PdfUploadApi",
-            rest_api_name="PDF Upload API",
-            description="API for PDF upload system",
+            self, "JsonUploadApi",
+            rest_api_name="ISM JSON Upload API",
+            description="API for ISM JSON control upload system",
             default_cors_preflight_options=apigateway.CorsOptions(
                 allow_origins=apigateway.Cors.ALL_ORIGINS,
                 allow_methods=apigateway.Cors.ALL_METHODS,
@@ -111,7 +111,7 @@ class PdfUploadSystemStack(Stack):
         )
 
         # Lambda integration
-        lambda_integration = apigateway.LambdaIntegration(pdf_lambda)
+        lambda_integration = apigateway.LambdaIntegration(json_lambda)
 
         # API endpoints
         upload_url_resource = api.root.add_resource("upload-url")
@@ -183,8 +183,8 @@ class PdfUploadSystemStack(Stack):
         # Outputs
         CfnOutput(self, "ApiUrl", value=api.url, description="API Gateway URL")
         CfnOutput(self, "CloudFrontUrl", value=f"https://{distribution.domain_name}", description="CloudFront URL")
-        CfnOutput(self, "PdfBucketName", value=pdf_bucket.bucket_name, description="PDF Storage Bucket Name")
-        CfnOutput(self, "MatchesTableName", value=matches_table.table_name, description="DynamoDB Matches Table Name")
+        CfnOutput(self, "JsonBucketName", value=json_bucket.bucket_name, description="JSON Storage Bucket Name")
+        CfnOutput(self, "ControlsTableName", value=controls_table.table_name, description="DynamoDB Controls Table Name")
         CfnOutput(self, "JobsTableName", value=jobs_table.table_name, description="DynamoDB Jobs Table Name")
 
     def _inject_api_url(self, file_path: str, api_url: str) -> str:

@@ -4,10 +4,6 @@ import boto3
 from botocore.config import Config
 from datetime import datetime, timedelta
 import uuid
-import re
-from PyPDF2 import PdfReader
-from io import BytesIO
-import time
 from decimal import Decimal
 
 # Configure S3 client with regional endpoint
@@ -21,9 +17,9 @@ BUCKET_NAME = os.environ['BUCKET_NAME']
 
 # Configure DynamoDB clients
 dynamodb = boto3.resource('dynamodb')
-MATCHES_TABLE_NAME = os.environ['MATCHES_TABLE_NAME']
+CONTROLS_TABLE_NAME = os.environ['CONTROLS_TABLE_NAME']
 JOBS_TABLE_NAME = os.environ['JOBS_TABLE_NAME']
-matches_table = dynamodb.Table(MATCHES_TABLE_NAME)
+controls_table = dynamodb.Table(CONTROLS_TABLE_NAME)
 jobs_table = dynamodb.Table(JOBS_TABLE_NAME)
 
 
@@ -34,13 +30,33 @@ def decimal_to_number(obj):
     return obj
 
 
+def extract_controls_recursive(obj, controls_list):
+    """Recursively extract all controls from nested JSON structure"""
+    if isinstance(obj, dict):
+        # If this object has a 'controls' key, process it
+        if 'controls' in obj:
+            for control in obj['controls']:
+                controls_list.append(control)
+
+        # Recursively search all values
+        for value in obj.values():
+            extract_controls_recursive(value, controls_list)
+
+    elif isinstance(obj, list):
+        # Recursively search all list items
+        for item in obj:
+            extract_controls_recursive(item, controls_list)
+
+    return controls_list
+
+
 def handler(event, context):
     """Main Lambda handler that routes requests to appropriate functions"""
     print(f"Event: {json.dumps(event)}")
 
     # Check if this is an async invocation for processing
     if event.get('async_processing'):
-        return process_pdf_job(event)
+        return process_json_job(event)
 
     path = event.get('path', '')
     http_method = event.get('httpMethod', '')
@@ -85,7 +101,7 @@ def handler(event, context):
 
 
 def get_upload_url(event, headers):
-    """Generate presigned S3 URL for PDF upload"""
+    """Generate presigned S3 URL for JSON upload"""
     try:
         # Parse request body if present
         body = {}
@@ -95,7 +111,7 @@ def get_upload_url(event, headers):
         # Generate unique filename with timestamp
         timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
         unique_id = str(uuid.uuid4())[:8]
-        original_filename = body.get('filename', 'upload.pdf')
+        original_filename = body.get('filename', 'upload.json')
         # Sanitize filename
         safe_filename = original_filename.replace(' ', '-')
         key = f"uploads/{timestamp}-{unique_id}-{safe_filename}"
@@ -105,10 +121,10 @@ def get_upload_url(event, headers):
             Bucket=BUCKET_NAME,
             Key=key,
             Fields={
-                'Content-Type': 'application/pdf'
+                'Content-Type': 'application/json'
             },
             Conditions=[
-                {'Content-Type': 'application/pdf'},
+                {'Content-Type': 'application/json'},
                 ['content-length-range', 1, 10485760]  # 1 byte to 10MB
             ],
             ExpiresIn=300  # 5 minutes
@@ -134,13 +150,12 @@ def get_upload_url(event, headers):
 
 
 def submit_form(event, headers):
-    """Create a job and trigger async PDF processing"""
+    """Create a job and trigger async JSON processing"""
     try:
         # Parse request body
         body = json.loads(event['body'])
 
         filename = body.get('filename', '')
-        regex_pattern = body.get('regex', '')
         url = body.get('url', '')
         s3_key = body.get('s3_key', '')
 
@@ -152,28 +167,11 @@ def submit_form(event, headers):
                 'body': json.dumps({'error': 'Filename is required'})
             }
 
-        if not regex_pattern:
-            return {
-                'statusCode': 400,
-                'headers': headers,
-                'body': json.dumps({'error': 'Regex pattern is required'})
-            }
-
         if not s3_key:
             return {
                 'statusCode': 400,
                 'headers': headers,
                 'body': json.dumps({'error': 'S3 key is required'})
-            }
-
-        # Validate regex
-        try:
-            re.compile(regex_pattern)
-        except re.error as e:
-            return {
-                'statusCode': 400,
-                'headers': headers,
-                'body': json.dumps({'error': f'Invalid regex pattern: {str(e)}'})
             }
 
         # Generate job ID
@@ -187,7 +185,6 @@ def submit_form(event, headers):
                 'job_id': job_id,
                 'status': 'processing',
                 'filename': filename,
-                'regex': regex_pattern,
                 'url': url,
                 's3_key': s3_key,
                 'created_at': timestamp,
@@ -195,7 +192,7 @@ def submit_form(event, headers):
             }
         )
 
-        print(f"Created job {job_id} for PDF: {filename}")
+        print(f"Created job {job_id} for JSON: {filename}")
 
         # Invoke Lambda asynchronously for processing
         lambda_client.invoke(
@@ -205,7 +202,6 @@ def submit_form(event, headers):
                 'async_processing': True,
                 'job_id': job_id,
                 'filename': filename,
-                'regex': regex_pattern,
                 'url': url,
                 's3_key': s3_key
             })
@@ -220,7 +216,7 @@ def submit_form(event, headers):
             'body': json.dumps({
                 'status': 'In Progress...',
                 'job_id': job_id,
-                'message': 'PDF processing started'
+                'message': 'JSON processing started'
             })
         }
 
@@ -233,11 +229,10 @@ def submit_form(event, headers):
         }
 
 
-def process_pdf_job(event):
-    """Background job to process PDF and store matches"""
+def process_json_job(event):
+    """Background job to process JSON and store controls"""
     job_id = event['job_id']
     filename = event['filename']
-    regex_pattern = event['regex']
     url = event['url']
     s3_key = event['s3_key']
 
@@ -255,77 +250,80 @@ def process_pdf_job(event):
             }
         )
 
-        # Compile regex
-        compiled_regex = re.compile(regex_pattern)
-
-        # Download PDF from S3
-        print(f"Downloading PDF from S3: {s3_key}")
+        # Download JSON from S3
+        print(f"Downloading JSON from S3: {s3_key}")
         response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-        pdf_content = response['Body'].read()
+        json_content = response['Body'].read().decode('utf-8')
 
-        # Extract text from PDF
-        print("Extracting text from PDF")
-        pdf_file = BytesIO(pdf_content)
-        pdf_reader = PdfReader(pdf_file)
+        # Parse JSON
+        print("Parsing JSON")
+        data = json.loads(json_content)
 
-        # Extract text from all pages
-        full_text = ""
-        for page_num, page in enumerate(pdf_reader.pages):
-            text = page.extract_text()
-            full_text += text + "\n"
+        # Extract all controls recursively
+        print("Extracting controls from JSON")
+        controls = []
+        extract_controls_recursive(data, controls)
 
-        print(f"Extracted {len(full_text)} characters from {len(pdf_reader.pages)} pages")
+        print(f"Found {len(controls)} controls in JSON")
 
-        # Find matching lines
-        print(f"Searching for matches with regex: {regex_pattern}")
-        lines = full_text.split('\n')
-        matches_found = 0
+        # Store each control in DynamoDB
+        controls_stored = 0
         timestamp = datetime.now().isoformat()
 
-        for line_number, line in enumerate(lines, start=1):
-            # Skip empty lines
-            if not line.strip():
+        for control in controls:
+            control_id = control.get('id')
+            if not control_id:
+                print(f"Skipping control without id: {control}")
                 continue
 
-            # Check if line matches regex
-            if compiled_regex.search(line):
-                matches_found += 1
+            # Extract prose from parts
+            prose = None
+            parts = control.get('parts', [])
+            for part in parts:
+                if part.get('name') == 'statement':
+                    prose = part.get('prose', '')
+                    break
 
-                # Store match in DynamoDB
-                try:
-                    matches_table.put_item(
-                        Item={
-                            'id': str(uuid.uuid4()),
-                            'job_id': job_id,
-                            'matched_line': line,
-                            'regex': regex_pattern,
-                            'source_file': filename,
-                            's3_key': s3_key,
-                            'url': url,
-                            'timestamp': timestamp,
-                            'line_number': line_number
-                        }
-                    )
-                except Exception as e:
-                    print(f"Error storing match in DynamoDB: {str(e)}")
-                    # Continue processing other matches
+            if prose is None:
+                print(f"Skipping control {control_id} without prose statement")
+                continue
 
-        print(f"Found and stored {matches_found} matches for job {job_id}")
+            # Store control in DynamoDB
+            try:
+                controls_table.put_item(
+                    Item={
+                        'id': control_id,
+                        'prose': prose,
+                        'job_id': job_id,
+                        'source_file': filename,
+                        's3_key': s3_key,
+                        'url': url,
+                        'timestamp': timestamp,
+                        'title': control.get('title', ''),
+                        'class': control.get('class', '')
+                    }
+                )
+                controls_stored += 1
+            except Exception as e:
+                print(f"Error storing control {control_id} in DynamoDB: {str(e)}")
+                # Continue processing other controls
+
+        print(f"Stored {controls_stored} controls for job {job_id}")
 
         # Update job status to completed
         jobs_table.update_item(
             Key={'job_id': job_id},
-            UpdateExpression='SET #status = :status, matches_found = :matches, completed_at = :completed',
+            UpdateExpression='SET #status = :status, controls_stored = :controls, completed_at = :completed',
             ExpressionAttributeNames={'#status': 'status'},
             ExpressionAttributeValues={
                 ':status': 'completed',
-                ':matches': matches_found,
+                ':controls': controls_stored,
                 ':completed': datetime.now().isoformat()
             }
         )
 
         print(f"Job {job_id} completed successfully")
-        return {'statusCode': 200, 'body': json.dumps({'job_id': job_id, 'matches_found': matches_found})}
+        return {'statusCode': 200, 'body': json.dumps({'job_id': job_id, 'controls_stored': controls_stored})}
 
     except Exception as e:
         print(f"Error processing job {job_id}: {str(e)}")
@@ -349,7 +347,7 @@ def process_pdf_job(event):
 
 
 def get_job_status(event, headers):
-    """Get the status of a PDF processing job"""
+    """Get the status of a JSON processing job"""
     try:
         # Extract job_id from path
         path = event.get('path', '')
@@ -392,7 +390,7 @@ def get_job_status(event, headers):
         }
 
         if status == 'completed':
-            result['matches_found'] = decimal_to_number(job.get('matches_found', 0))
+            result['controls_stored'] = decimal_to_number(job.get('controls_stored', 0))
             result['completed_at'] = job.get('completed_at', '')
             result['message'] = 'Success!'
         elif status == 'failed':

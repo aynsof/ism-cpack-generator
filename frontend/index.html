@@ -3,28 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PDF Upload System</title>
+    <title>ISM Controls Upload</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <div class="container">
-        <h1>PDF Upload System</h1>
+        <h1>ISM Controls Upload</h1>
 
         <form id="uploadForm">
             <div class="form-group">
-                <label for="pdfFile">Upload PDF:</label>
-                <input type="file" id="pdfFile" name="pdfFile" accept=".pdf" required>
+                <label for="jsonFile">Upload JSON File:</label>
+                <input type="file" id="jsonFile" name="jsonFile" accept=".json,application/json" required>
                 <small class="file-info" id="fileInfo"></small>
             </div>
 
             <div class="form-group">
-                <label for="regex">Regex Pattern:</label>
-                <input type="text" id="regex" name="regex" placeholder="e.g., ^test.*" required>
-            </div>
-
-            <div class="form-group">
                 <label for="url">URL:</label>
-                <input type="text" id="url" name="url" placeholder="https://example.com" required>
+                <input type="text" id="url" name="url" placeholder="https://example.com">
             </div>
 
             <button type="submit" id="submitBtn">Submit</button>
@@ -51,8 +46,7 @@
         const API_URL = '{{API_URL}}';
 
         const form = document.getElementById('uploadForm');
-        const pdfFileInput = document.getElementById('pdfFile');
-        const regexInput = document.getElementById('regex');
+        const jsonFileInput = document.getElementById('jsonFile');
         const urlInput = document.getElementById('url');
         const submitBtn = document.getElementById('submitBtn');
         const successMessage = document.getElementById('successMessage');
@@ -64,7 +58,7 @@
         const fileInfo = document.getElementById('fileInfo');
 
         // Show file info when file is selected
-        pdfFileInput.addEventListener('change', (e) => {
+        jsonFileInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (file) {
                 const sizeInMB = (file.size / (1024 * 1024)).toFixed(2);
@@ -99,7 +93,7 @@
                         // Success!
                         loadingMessage.classList.add('hidden');
                         successTitle.textContent = 'Success!';
-                        successText.textContent = `File: ${status.filename} - Found ${status.matches_found} matches`;
+                        successText.textContent = `File: ${status.filename} - Stored ${status.controls_stored} controls`;
                         successMessage.classList.remove('hidden');
 
                         // Reset form
@@ -143,12 +137,11 @@
             submitBtn.disabled = true;
 
             try {
-                const file = pdfFileInput.files[0];
+                const file = jsonFileInput.files[0];
                 if (!file) {
-                    throw new Error('Please select a PDF file');
+                    throw new Error('Please select a JSON file');
                 }
 
-                const regex = regexInput.value.trim();
                 const url = urlInput.value.trim();
 
                 // Step 1: Get presigned upload URL
@@ -204,7 +197,6 @@
                     },
                     body: JSON.stringify({
                         filename: file.name,
-                        regex: regex,
                         url: url,
                         s3_key: s3Key
                     })
