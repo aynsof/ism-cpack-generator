@@ -14,6 +14,7 @@ s3_config = Config(
 s3_client = boto3.client('s3', config=s3_config)
 lambda_client = boto3.client('lambda')
 BUCKET_NAME = os.environ['BUCKET_NAME']
+CONTROL_PROCESSOR_FUNCTION_NAME = os.environ.get('CONTROL_PROCESSOR_FUNCTION_NAME')
 
 # Configure DynamoDB clients
 dynamodb = boto3.resource('dynamodb')
@@ -250,6 +251,35 @@ def process_json_job(event):
             }
         )
 
+        # Fetch AWS Config Rules once for this job
+        print("Fetching AWS Config Rules documentation...")
+        config_rules_url = "https://docs.aws.amazon.com/config/latest/developerguide/managed-rules-by-aws-config.html"
+        config_rules_key = f"config-rules/{job_id}/rules.html"
+
+        try:
+            import urllib3
+            http = urllib3.PoolManager()
+            response = http.request('GET', config_rules_url, timeout=30.0)
+
+            if response.status != 200:
+                print(f"Warning: Failed to fetch Config Rules (status {response.status}), continuing without them")
+                config_rules_key = None
+            else:
+                config_rules_content = response.data
+
+                # Store in S3
+                s3_client.put_object(
+                    Bucket=BUCKET_NAME,
+                    Key=config_rules_key,
+                    Body=config_rules_content,
+                    ContentType='text/html'
+                )
+                print(f"Stored Config Rules at s3://{BUCKET_NAME}/{config_rules_key}")
+
+        except Exception as e:
+            print(f"Warning: Error fetching Config Rules: {str(e)}, continuing without them")
+            config_rules_key = None
+
         # Download JSON from S3
         print(f"Downloading JSON from S3: {s3_key}")
         response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
@@ -266,8 +296,8 @@ def process_json_job(event):
 
         print(f"Found {len(controls)} controls in JSON")
 
-        # Store each control in DynamoDB
-        controls_stored = 0
+        # Fan out control processing to separate Lambda invocations
+        controls_dispatched = 0
         timestamp = datetime.now().isoformat()
 
         for control in controls:
@@ -276,54 +306,59 @@ def process_json_job(event):
                 print(f"Skipping control without id: {control}")
                 continue
 
-            # Extract prose from parts
-            prose = None
+            # Check if control has prose statement
+            has_prose = False
             parts = control.get('parts', [])
             for part in parts:
-                if part.get('name') == 'statement':
-                    prose = part.get('prose', '')
+                if part.get('name') == 'statement' and part.get('prose'):
+                    has_prose = True
                     break
 
-            if prose is None:
+            if not has_prose:
                 print(f"Skipping control {control_id} without prose statement")
                 continue
 
-            # Store control in DynamoDB
+            # Invoke control processor Lambda asynchronously
             try:
-                controls_table.put_item(
-                    Item={
-                        'id': control_id,
-                        'prose': prose,
-                        'job_id': job_id,
-                        'source_file': filename,
-                        's3_key': s3_key,
-                        'url': url,
-                        'timestamp': timestamp,
-                        'title': control.get('title', ''),
-                        'class': control.get('class', '')
-                    }
+                payload = {
+                    'control': control,
+                    'job_id': job_id,
+                    'source_file': filename,
+                    's3_key': s3_key,
+                    'url': url,
+                    'timestamp': timestamp,
+                    'config_rules_s3_key': config_rules_key
+                }
+
+                lambda_client.invoke(
+                    FunctionName=CONTROL_PROCESSOR_FUNCTION_NAME,
+                    InvocationType='Event',  # Async invocation
+                    Payload=json.dumps(payload)
                 )
-                controls_stored += 1
+
+                controls_dispatched += 1
+                print(f"Dispatched control {control_id} for processing")
+
             except Exception as e:
-                print(f"Error storing control {control_id} in DynamoDB: {str(e)}")
+                print(f"Error dispatching control {control_id}: {str(e)}")
                 # Continue processing other controls
 
-        print(f"Stored {controls_stored} controls for job {job_id}")
+        print(f"Dispatched {controls_dispatched} controls for job {job_id}")
 
         # Update job status to completed
         jobs_table.update_item(
             Key={'job_id': job_id},
-            UpdateExpression='SET #status = :status, controls_stored = :controls, completed_at = :completed',
+            UpdateExpression='SET #status = :status, controls_dispatched = :controls, completed_at = :completed',
             ExpressionAttributeNames={'#status': 'status'},
             ExpressionAttributeValues={
                 ':status': 'completed',
-                ':controls': controls_stored,
+                ':controls': controls_dispatched,
                 ':completed': datetime.now().isoformat()
             }
         )
 
-        print(f"Job {job_id} completed successfully")
-        return {'statusCode': 200, 'body': json.dumps({'job_id': job_id, 'controls_stored': controls_stored})}
+        print(f"Job {job_id} completed successfully - dispatched {controls_dispatched} controls for processing")
+        return {'statusCode': 200, 'body': json.dumps({'job_id': job_id, 'controls_dispatched': controls_dispatched})}
 
     except Exception as e:
         print(f"Error processing job {job_id}: {str(e)}")
@@ -390,7 +425,7 @@ def get_job_status(event, headers):
         }
 
         if status == 'completed':
-            result['controls_stored'] = decimal_to_number(job.get('controls_stored', 0))
+            result['controls_dispatched'] = decimal_to_number(job.get('controls_dispatched', 0))
             result['completed_at'] = job.get('completed_at', '')
             result['message'] = 'Success!'
         elif status == 'failed':

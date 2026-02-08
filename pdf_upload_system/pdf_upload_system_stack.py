@@ -48,6 +48,26 @@ class PdfUploadSystemStack(Stack):
             removal_policy=RemovalPolicy.DESTROY
         )
 
+        # DynamoDB table for storing ISM control to Config Rule mappings
+        config_mappings_table = dynamodb.Table(
+            self, "ConfigMappingsTable",
+            partition_key=dynamodb.Attribute(
+                name="mapping_id",
+                type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY
+        )
+
+        # Add GSI for querying by control_id
+        config_mappings_table.add_global_secondary_index(
+            index_name="ControlIdIndex",
+            partition_key=dynamodb.Attribute(
+                name="control_id",
+                type=dynamodb.AttributeType.STRING
+            )
+        )
+
         # DynamoDB table for tracking job status
         jobs_table = dynamodb.Table(
             self, "JobsTable",
@@ -60,7 +80,22 @@ class PdfUploadSystemStack(Stack):
             time_to_live_attribute="ttl"  # Auto-delete old jobs after 24 hours
         )
 
-        # Lambda function
+        # Control processor Lambda - processes individual ISM controls
+        control_processor_lambda = lambda_.Function(
+            self, "ControlProcessorHandler",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="control_processor.handler",
+            code=lambda_.Code.from_asset("lambda"),
+            environment={
+                "CONTROLS_TABLE_NAME": controls_table.table_name,
+                "CONFIG_MAPPINGS_TABLE_NAME": config_mappings_table.table_name,
+                "BUCKET_NAME": json_bucket.bucket_name
+            },
+            timeout=Duration.seconds(60),
+            memory_size=512
+        )
+
+        # Main orchestrator Lambda - extracts controls and dispatches them
         json_lambda = lambda_.Function(
             self, "JsonUploadHandler",
             runtime=lambda_.Runtime.PYTHON_3_11,
@@ -69,21 +104,42 @@ class PdfUploadSystemStack(Stack):
             environment={
                 "BUCKET_NAME": json_bucket.bucket_name,
                 "CONTROLS_TABLE_NAME": controls_table.table_name,
-                "JOBS_TABLE_NAME": jobs_table.table_name
+                "JOBS_TABLE_NAME": jobs_table.table_name,
+                "CONTROL_PROCESSOR_FUNCTION_NAME": control_processor_lambda.function_name
             },
             timeout=Duration.seconds(90),
             memory_size=512
         )
 
-        # Grant Lambda permissions to S3
+        # Grant control processor Lambda permissions to DynamoDB
+        controls_table.grant_write_data(control_processor_lambda)
+        config_mappings_table.grant_write_data(control_processor_lambda)
+
+        # Grant control processor Lambda permissions to S3
+        json_bucket.grant_read(control_processor_lambda)
+
+        # Grant control processor Lambda permissions to Bedrock
+        control_processor_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=['bedrock:InvokeModel'],
+                resources=[
+                    # Allow access to Opus 4.5 inference profile in this region
+                    f'arn:aws:bedrock:ap-southeast-2:{self.account}:inference-profile/global.anthropic.claude-opus-4-5-20251101-v1:0',
+                    # Allow access to foundation model in all regions (global inference profiles route across regions)
+                    'arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-4-5-20251101-v1:0'
+                ]
+            )
+        )
+
+        # Grant main Lambda permissions to S3
         json_bucket.grant_put(json_lambda)
         json_bucket.grant_read(json_lambda)
 
-        # Grant Lambda permissions to DynamoDB
-        controls_table.grant_read_write_data(json_lambda)
+        # Grant main Lambda permissions to DynamoDB
         jobs_table.grant_read_write_data(json_lambda)
 
-        # Grant Lambda permission to invoke itself asynchronously
+        # Grant main Lambda permission to invoke itself asynchronously (for job processing)
+        # and to invoke the control processor Lambda (for fan-out)
         # Using wildcard to avoid circular dependency
         json_lambda.add_to_role_policy(
             iam.PolicyStatement(
@@ -186,6 +242,8 @@ class PdfUploadSystemStack(Stack):
         CfnOutput(self, "JsonBucketName", value=json_bucket.bucket_name, description="JSON Storage Bucket Name")
         CfnOutput(self, "ControlsTableName", value=controls_table.table_name, description="DynamoDB Controls Table Name")
         CfnOutput(self, "JobsTableName", value=jobs_table.table_name, description="DynamoDB Jobs Table Name")
+        CfnOutput(self, "ControlProcessorFunctionName", value=control_processor_lambda.function_name, description="Control Processor Lambda Function Name")
+        CfnOutput(self, "ConfigMappingsTableName", value=config_mappings_table.table_name, description="DynamoDB Config Mappings Table Name")
 
     def _inject_api_url(self, file_path: str, api_url: str) -> str:
         """Read HTML file and inject API URL"""
