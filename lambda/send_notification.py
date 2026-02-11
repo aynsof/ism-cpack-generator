@@ -63,6 +63,36 @@ def handler(event, context):
             message += f"Total Packs: {len(presigned_urls)}\n"
             message += f"URLs valid for 7 days\n"
 
+    # Check if HTML mappings report was generated
+    if conformance_pack_result and 'html_mappings_report' in conformance_pack_result:
+        html_report = conformance_pack_result['html_mappings_report']
+        s3_key = html_report.get('s3_key')
+
+        if s3_key:
+            print(f"Generating presigned URL for HTML mappings report")
+            try:
+                html_url = s3_client.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': bucket_name, 'Key': s3_key},
+                    ExpiresIn=604800  # 7 days
+                )
+
+                # Append HTML report URL to message
+                message += "\n\n" + "="*60 + "\n"
+                message += "ISM Control Mappings Report\n"
+                message += "="*60 + "\n\n"
+                message += "View an interactive HTML report showing all ISM controls\n"
+                message += "mapped to AWS Config Rules with explanations:\n\n"
+                message += f"{html_url}\n\n"
+                message += "This report includes:\n"
+                message += "- Complete control-to-rule mappings\n"
+                message += "- Relevance explanations for each mapping\n"
+                message += "- Interactive search and filtering\n"
+                message += "- URL valid for 7 days\n"
+
+            except Exception as e:
+                print(f"Error generating presigned URL for HTML report: {e}")
+
     # Check if email is already subscribed
     subscriptions = sns_client.list_subscriptions_by_topic(TopicArn=SNS_TOPIC_ARN)
 

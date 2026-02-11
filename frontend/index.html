@@ -19,7 +19,7 @@
 
             <div class="form-group">
                 <label for="url">URL:</label>
-                <input type="text" id="url" name="url" placeholder="https://example.com">
+                <input type="text" id="url" name="url" value="https://docs.aws.amazon.com/config/latest/developerguide/managed-rules-by-aws-config.html" placeholder="https://example.com">
             </div>
 
             <div class="form-group">
@@ -110,7 +110,7 @@
                         // Success!
                         loadingMessage.classList.add('hidden');
                         successTitle.textContent = 'Success!';
-                        successText.textContent = `File: ${status.filename} - Dispatched ${status.controls_dispatched} controls for processing. You should also receive an email notification.`;
+                        successText.textContent = `File: ${status.filename} - Dispatched ${status.controls_dispatched} controls for processing. You will receive an email notification when processing is complete.`;
                         successMessage.classList.remove('hidden');
 
                         // Reset form

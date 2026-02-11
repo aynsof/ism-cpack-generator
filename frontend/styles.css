@@ -43,6 +43,7 @@ label {
 }
 
 input[type="text"],
+input[type="email"],
 input[type="file"] {
     width: 100%;
     padding: 12px;
@@ -52,7 +53,8 @@ input[type="file"] {
     transition: border-color 0.3s;
 }
 
-input[type="text"]:focus {
+input[type="text"]:focus,
+input[type="email"]:focus {
     outline: none;
     border-color: #667eea;
 }

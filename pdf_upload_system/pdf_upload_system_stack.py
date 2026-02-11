@@ -194,7 +194,8 @@ class PdfUploadSystemStack(Stack):
             handler="conformance_pack_aggregator.lambda_handler",
             code=lambda_.Code.from_asset("lambda"),
             environment={
-                "OUTPUT_BUCKET_NAME": json_bucket.bucket_name
+                "OUTPUT_BUCKET_NAME": json_bucket.bucket_name,
+                "CONFIG_MAPPINGS_TABLE_NAME": config_mappings_table.table_name
             },
             timeout=Duration.seconds(120),  # 2 minutes
             memory_size=512
@@ -263,6 +264,7 @@ class PdfUploadSystemStack(Stack):
 
         # Grant conformance_pack_aggregator Lambda permissions
         json_bucket.grant_read_write(conformance_pack_aggregator_lambda)
+        config_mappings_table.grant_read_data(conformance_pack_aggregator_lambda)
 
         # Step Functions State Machine
         # Load workflow definition from file
