@@ -22,6 +22,14 @@
                 <input type="text" id="url" name="url" placeholder="https://example.com">
             </div>
 
+            <div class="form-group">
+                <label for="email">Email Address (for notifications):</label>
+                <input type="email" id="email" name="email" required
+                       placeholder="your-email@example.com"
+                       pattern="[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}">
+                <small class="file-info">You'll receive an email when processing completes</small>
+            </div>
+
             <button type="submit" id="submitBtn">Submit</button>
         </form>
 
@@ -48,6 +56,7 @@
         const form = document.getElementById('uploadForm');
         const jsonFileInput = document.getElementById('jsonFile');
         const urlInput = document.getElementById('url');
+        const emailInput = document.getElementById('email');
         const submitBtn = document.getElementById('submitBtn');
         const successMessage = document.getElementById('successMessage');
         const errorMessage = document.getElementById('errorMessage');
@@ -82,6 +91,14 @@
                         }
                     });
 
+                    // Handle 404 as "job not created yet" (race condition)
+                    if (statusResponse.status === 404) {
+                        console.log('Job not found yet, waiting...');
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        attempts++;
+                        continue;
+                    }
+
                     if (!statusResponse.ok) {
                         throw new Error('Failed to get job status');
                     }
@@ -93,7 +110,7 @@
                         // Success!
                         loadingMessage.classList.add('hidden');
                         successTitle.textContent = 'Success!';
-                        successText.textContent = `File: ${status.filename} - Dispatched ${status.controls_dispatched} controls for processing`;
+                        successText.textContent = `File: ${status.filename} - Dispatched ${status.controls_dispatched} controls for processing. You should also receive an email notification.`;
                         successMessage.classList.remove('hidden');
 
                         // Reset form
@@ -143,6 +160,11 @@
                 }
 
                 const url = urlInput.value.trim();
+                const email = emailInput.value.trim();
+
+                if (!email) {
+                    throw new Error('Please enter an email address');
+                }
 
                 // Step 1: Get presigned upload URL
                 console.log('Getting presigned URL...');
@@ -188,32 +210,32 @@
                 }
                 console.log('File uploaded to S3');
 
-                // Step 3: Submit form data to API
-                console.log('Submitting form...');
-                const submitResponse = await fetch(`${API_URL}submit`, {
+                // Step 3: Generate job ID and start Step Functions workflow
+                // Generate job ID on frontend so we can poll immediately
+                const jobId = crypto.randomUUID();
+                console.log('Generated job ID:', jobId);
+
+                console.log('Starting workflow...');
+                const submitResponse = await fetch(`${API_URL}start-workflow`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        job_id: jobId,
                         filename: file.name,
                         url: url,
-                        s3_key: s3Key
+                        s3_key: s3Key,
+                        email: email
                     })
                 });
 
                 if (!submitResponse.ok) {
-                    throw new Error('Failed to submit form');
+                    throw new Error('Failed to start workflow');
                 }
 
                 const result = await submitResponse.json();
-                console.log('Form submitted successfully', result);
-
-                // Get job ID and start polling
-                const jobId = result.job_id;
-                if (!jobId) {
-                    throw new Error('No job ID returned');
-                }
+                console.log('Workflow started successfully', result);
 
                 console.log('Polling for job status:', jobId);
 

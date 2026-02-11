@@ -1,0 +1,120 @@
+{
+  "Comment": "ISM Control Processing Workflow with Email Notification",
+  "StartAt": "CreateJob",
+  "States": {
+    "CreateJob": {
+      "Type": "Task",
+      "Resource": "${CreateJobLambdaArn}",
+      "Parameters": {
+        "job_id.$": "$.job_id",
+        "filename.$": "$.filename",
+        "url.$": "$.url",
+        "s3_key.$": "$.s3_key",
+        "email.$": "$.email",
+        "execution_arn.$": "$$.Execution.Name"
+      },
+      "ResultPath": "$.jobDetails",
+      "Next": "ProcessJSON"
+    },
+    "ProcessJSON": {
+      "Type": "Task",
+      "Resource": "${ProcessJsonLambdaArn}",
+      "Parameters": {
+        "job_id.$": "$.jobDetails.job_id",
+        "s3_key.$": "$.s3_key",
+        "bucket_name": "${BucketName}"
+      },
+      "ResultPath": "$.processingResult",
+      "Catch": [{
+        "ErrorEquals": ["States.ALL"],
+        "ResultPath": "$.error",
+        "Next": "UpdateJobFailed"
+      }],
+      "Next": "ProcessControls"
+    },
+    "ProcessControls": {
+      "Type": "Map",
+      "ItemsPath": "$.processingResult.controls",
+      "MaxConcurrency": 100,
+      "Iterator": {
+        "StartAt": "ProcessSingleControl",
+        "States": {
+          "ProcessSingleControl": {
+            "Type": "Task",
+            "Resource": "${ControlProcessorLambdaArn}",
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.controlResults",
+      "Catch": [{
+        "ErrorEquals": ["States.ALL"],
+        "ResultPath": "$.error",
+        "Next": "UpdateJobFailed"
+      }],
+      "Next": "UpdateJobCompleted"
+    },
+    "UpdateJobCompleted": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "job_id": {"S.$": "$.jobDetails.job_id"}
+        },
+        "UpdateExpression": "SET #status = :status, controls_dispatched = :count, completed_at = :completed",
+        "ExpressionAttributeNames": {
+          "#status": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {"S": "completed"},
+          ":count": {"N.$": "States.JsonToString($.processingResult.controls_count)"},
+          ":completed": {"S.$": "$$.State.EnteredTime"}
+        }
+      },
+      "ResultPath": "$.updateResult",
+      "Next": "SendSuccessNotification"
+    },
+    "UpdateJobFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "job_id": {"S.$": "$.jobDetails.job_id"}
+        },
+        "UpdateExpression": "SET #status = :status, error_message = :error, failed_at = :failed",
+        "ExpressionAttributeNames": {
+          "#status": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {"S": "failed"},
+          ":error": {"S.$": "$.error.Cause"},
+          ":failed": {"S.$": "$$.State.EnteredTime"}
+        }
+      },
+      "ResultPath": "$.updateResult",
+      "Next": "SendFailureNotification"
+    },
+    "SendSuccessNotification": {
+      "Type": "Task",
+      "Resource": "${SendNotificationLambdaArn}",
+      "Parameters": {
+        "email.$": "$.jobDetails.email",
+        "subject": "ISM Control Processing Complete",
+        "message.$": "States.Format('Success! Processed {} controls from file: {}', $.processingResult.controls_count, $.jobDetails.filename)"
+      },
+      "End": true
+    },
+    "SendFailureNotification": {
+      "Type": "Task",
+      "Resource": "${SendNotificationLambdaArn}",
+      "Parameters": {
+        "email.$": "$.jobDetails.email",
+        "subject": "ISM Control Processing Failed",
+        "message.$": "States.Format('Processing failed for file: {}. Error: {}', $.jobDetails.filename, $.error.Cause)"
+      },
+      "End": true
+    }
+  }
+}

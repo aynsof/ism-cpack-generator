@@ -11,8 +11,11 @@ from aws_cdk import (
     aws_cloudfront_origins as origins,
     aws_iam as iam,
     aws_dynamodb as dynamodb,
+    aws_stepfunctions as sfn,
+    aws_sns as sns,
 )
 from constructs import Construct
+import json
 
 class PdfUploadSystemStack(Stack):
 
@@ -95,7 +98,7 @@ class PdfUploadSystemStack(Stack):
             memory_size=512
         )
 
-        # Main orchestrator Lambda - extracts controls and dispatches them
+        # Main orchestrator Lambda - handles /upload-url and /status endpoints only
         json_lambda = lambda_.Function(
             self, "JsonUploadHandler",
             runtime=lambda_.Runtime.PYTHON_3_11,
@@ -103,12 +106,57 @@ class PdfUploadSystemStack(Stack):
             code=lambda_.Code.from_asset("lambda"),
             environment={
                 "BUCKET_NAME": json_bucket.bucket_name,
-                "CONTROLS_TABLE_NAME": controls_table.table_name,
-                "JOBS_TABLE_NAME": jobs_table.table_name,
-                "CONTROL_PROCESSOR_FUNCTION_NAME": control_processor_lambda.function_name
+                "JOBS_TABLE_NAME": jobs_table.table_name
             },
             timeout=Duration.seconds(90),
             memory_size=512
+        )
+
+        # SNS Topic for email notifications
+        notifications_topic = sns.Topic(
+            self, "ProcessingNotifications",
+            display_name="ISM Control Processing Notifications",
+            topic_name="ism-control-processing-notifications"
+        )
+
+        # Create Job Lambda - creates job record in DynamoDB
+        create_job_lambda = lambda_.Function(
+            self, "CreateJobHandler",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="create_job.handler",
+            code=lambda_.Code.from_asset("lambda"),
+            environment={
+                "JOBS_TABLE_NAME": jobs_table.table_name
+            },
+            timeout=Duration.seconds(30),
+            memory_size=256
+        )
+
+        # Process JSON Lambda - extracts controls from JSON
+        process_json_lambda = lambda_.Function(
+            self, "ProcessJsonHandler",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="process_json.handler",
+            code=lambda_.Code.from_asset("lambda"),
+            environment={
+                "BUCKET_NAME": json_bucket.bucket_name,
+                "JOBS_TABLE_NAME": jobs_table.table_name
+            },
+            timeout=Duration.seconds(90),
+            memory_size=512
+        )
+
+        # Send Notification Lambda - sends SNS email notifications
+        send_notification_lambda = lambda_.Function(
+            self, "SendNotificationHandler",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="send_notification.handler",
+            code=lambda_.Code.from_asset("lambda"),
+            environment={
+                "SNS_TOPIC_ARN": notifications_topic.topic_arn
+            },
+            timeout=Duration.seconds(30),
+            memory_size=256
         )
 
         # Grant control processor Lambda permissions to DynamoDB
@@ -136,15 +184,65 @@ class PdfUploadSystemStack(Stack):
         json_bucket.grant_read(json_lambda)
 
         # Grant main Lambda permissions to DynamoDB
-        jobs_table.grant_read_write_data(json_lambda)
+        jobs_table.grant_read_data(json_lambda)  # Only read for status checks
 
-        # Grant main Lambda permission to invoke itself asynchronously (for job processing)
-        # and to invoke the control processor Lambda (for fan-out)
-        # Using wildcard to avoid circular dependency
-        json_lambda.add_to_role_policy(
+        # Grant create_job Lambda permissions
+        jobs_table.grant_read_write_data(create_job_lambda)
+
+        # Grant process_json Lambda permissions
+        json_bucket.grant_read(process_json_lambda)
+        json_bucket.grant_write(process_json_lambda)  # For Config Rules storage
+        jobs_table.grant_read_write_data(process_json_lambda)
+
+        # Grant send_notification Lambda permissions
+        notifications_topic.grant_publish(send_notification_lambda)
+        send_notification_lambda.add_to_role_policy(
             iam.PolicyStatement(
-                actions=['lambda:InvokeFunction'],
-                resources=['*']  # Or restrict to same account/region if needed
+                actions=['sns:Subscribe', 'sns:ListSubscriptionsByTopic'],
+                resources=[notifications_topic.topic_arn]
+            )
+        )
+
+        # Step Functions State Machine
+        # Load workflow definition from file
+        with open('stepfunctions/workflow.asl.json', 'r') as f:
+            workflow_definition = f.read()
+
+        # Replace placeholders with actual ARNs
+        workflow_definition = workflow_definition.replace(
+            '${CreateJobLambdaArn}', create_job_lambda.function_arn
+        ).replace(
+            '${ProcessJsonLambdaArn}', process_json_lambda.function_arn
+        ).replace(
+            '${ControlProcessorLambdaArn}', control_processor_lambda.function_arn
+        ).replace(
+            '${SendNotificationLambdaArn}', send_notification_lambda.function_arn
+        ).replace(
+            '${BucketName}', json_bucket.bucket_name
+        ).replace(
+            '${JobsTableName}', jobs_table.table_name
+        )
+
+        # Create state machine
+        control_processor_state_machine = sfn.StateMachine(
+            self, "ControlProcessorStateMachine",
+            state_machine_name="ISMControlProcessorWorkflow",
+            definition_body=sfn.DefinitionBody.from_string(workflow_definition),
+            timeout=Duration.minutes(30),
+            tracing_enabled=True
+        )
+
+        # Grant state machine permissions to invoke Lambdas
+        create_job_lambda.grant_invoke(control_processor_state_machine)
+        process_json_lambda.grant_invoke(control_processor_state_machine)
+        control_processor_lambda.grant_invoke(control_processor_state_machine)
+        send_notification_lambda.grant_invoke(control_processor_state_machine)
+
+        # Grant state machine permissions to update DynamoDB
+        control_processor_state_machine.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=['dynamodb:UpdateItem'],
+                resources=[jobs_table.table_arn]
             )
         )
 
@@ -166,20 +264,84 @@ class PdfUploadSystemStack(Stack):
             )
         )
 
-        # Lambda integration
+        # Lambda integration for /upload-url and /status endpoints
         lambda_integration = apigateway.LambdaIntegration(json_lambda)
 
         # API endpoints
         upload_url_resource = api.root.add_resource("upload-url")
         upload_url_resource.add_method("POST", lambda_integration)
 
-        submit_resource = api.root.add_resource("submit")
-        submit_resource.add_method("POST", lambda_integration)
-
         # Status endpoint with path parameter
         status_resource = api.root.add_resource("status")
         job_id_resource = status_resource.add_resource("{job_id}")
         job_id_resource.add_method("GET", lambda_integration)
+
+        # Step Functions integration for /start-workflow endpoint
+        # IAM role for API Gateway to start Step Functions
+        api_sfn_role = iam.Role(
+            self, "ApiStepFunctionsRole",
+            assumed_by=iam.ServicePrincipal("apigateway.amazonaws.com")
+        )
+        control_processor_state_machine.grant_start_execution(api_sfn_role)
+
+        # Step Functions integration
+        sfn_integration = apigateway.AwsIntegration(
+            service="states",
+            action="StartExecution",
+            integration_http_method="POST",
+            options=apigateway.IntegrationOptions(
+                credentials_role=api_sfn_role,
+                passthrough_behavior=apigateway.PassthroughBehavior.NEVER,
+                request_templates={
+                    "application/json": json.dumps({
+                        "input": "$util.escapeJavaScript($input.json('$'))",
+                        "stateMachineArn": control_processor_state_machine.state_machine_arn
+                    })
+                },
+                integration_responses=[
+                    apigateway.IntegrationResponse(
+                        status_code="200",
+                        response_parameters={
+                            "method.response.header.Access-Control-Allow-Origin": "'*'"
+                        },
+                        response_templates={
+                            "application/json": """{
+    "executionArn": $input.json('$.executionArn'),
+    "startDate": $input.json('$.startDate')
+}"""
+                        }
+                    ),
+                    apigateway.IntegrationResponse(
+                        status_code="500",
+                        selection_pattern="5\\d{2}",
+                        response_parameters={
+                            "method.response.header.Access-Control-Allow-Origin": "'*'"
+                        }
+                    )
+                ]
+            )
+        )
+
+        # Add /start-workflow endpoint
+        start_workflow_resource = api.root.add_resource("start-workflow")
+        start_workflow_resource.add_method(
+            "POST",
+            sfn_integration,
+            method_responses=[
+                apigateway.MethodResponse(
+                    status_code="200",
+                    response_parameters={
+                        "method.response.header.Access-Control-Allow-Origin": True
+                    }
+                ),
+                apigateway.MethodResponse(
+                    status_code="500",
+                    response_parameters={
+                        "method.response.header.Access-Control-Allow-Origin": True
+                    }
+                )
+            ]
+        )
 
         # S3 Bucket for frontend
         frontend_bucket = s3.Bucket(
@@ -244,6 +406,8 @@ class PdfUploadSystemStack(Stack):
         CfnOutput(self, "JobsTableName", value=jobs_table.table_name, description="DynamoDB Jobs Table Name")
         CfnOutput(self, "ControlProcessorFunctionName", value=control_processor_lambda.function_name, description="Control Processor Lambda Function Name")
         CfnOutput(self, "ConfigMappingsTableName", value=config_mappings_table.table_name, description="DynamoDB Config Mappings Table Name")
+        CfnOutput(self, "StateMachineArn", value=control_processor_state_machine.state_machine_arn, description="Control Processor State Machine ARN")
+        CfnOutput(self, "SNSTopicArn", value=notifications_topic.topic_arn, description="SNS Topic for Notifications")
 
     def _inject_api_url(self, file_path: str, api_url: str) -> str:
         """Read HTML file and inject API URL"""

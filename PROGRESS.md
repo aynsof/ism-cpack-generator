@@ -840,18 +840,131 @@ aws dynamodb scan \
 - Add validation layer to verify Config Rule identifiers exist
 - Implement retry logic for Bedrock API failures
 
+## Step Functions Orchestration (Version 6.0)
+
+### Migration from Lambda Self-Invocation to Step Functions
+
+**Date**: 2026-02-11
+
+Rearchitected the control processing workflow to use AWS Step Functions for better orchestration, observability, and user notifications.
+
+#### Architecture Changes
+
+**Previous Architecture:**
+- Frontend → API Gateway `/submit` → Lambda (creates job + self-invokes async) → Fan-out to control processors
+- Polling-only status updates via `/status/{job_id}`
+
+**New Architecture:**
+- Frontend → API Gateway `/start-workflow` → Step Functions → CreateJob → ProcessJSON → Map(ControlProcessors) → SNS Notification
+- Frontend polls `/status/{job_id}` AND receives email notification upon completion
+
+#### Key Components
+
+1. **Step Functions State Machine** (`ISMControlProcessorWorkflow`):
+   - **CreateJob**: Creates DynamoDB job record with email and execution tracking
+   - **ProcessJSON**: Extracts controls from S3, fetches Config Rules, formats for Map state
+   - **ProcessControls**: Map state with MaxConcurrency=100 for parallel control processing
+   - **UpdateJobCompleted/Failed**: Updates DynamoDB job status
+   - **SendNotification**: Sends SNS email to user with results
+   - Includes comprehensive error handling with Catch blocks
+   - X-Ray tracing enabled for observability
+
+2. **New Lambda Functions**:
+   - `CreateJobHandler`: Creates job record in DynamoDB (30s timeout)
+   - `ProcessJsonHandler`: Extracts controls and returns list for Map state (90s timeout)
+   - `SendNotificationHandler`: Manages SNS subscriptions and sends email (30s timeout)
+
+3. **Modified Lambda Functions**:
+   - `JsonUploadHandler`: Simplified to only handle `/upload-url` and `/status` endpoints (removed submit logic)
+
+4. **API Gateway Integration**:
+   - Direct AWS Service Integration with Step Functions (no Lambda proxy)
+   - `/start-workflow` endpoint triggers state machine execution
+   - Improved CORS handling
+
+5. **SNS Email Notifications**:
+   - Topic: `ism-control-processing-notifications`
+   - Auto-subscribes new email addresses (requires confirmation on first use)
+   - Success/failure notifications with control count or error details
+
+6. **Frontend Enhancements**:
+   - Added email input field with validation
+   - Frontend generates job_id using `crypto.randomUUID()` for immediate polling
+   - Graceful handling of 404 responses during polling (race condition fix)
+   - Updated success message to mention email notification
+
+#### Race Condition Fix
+
+**Issue**: Frontend started polling before Step Functions CreateJob completed, causing 404 errors.
+
+**Solution**: Frontend now treats 404 as "job not created yet" and continues polling instead of throwing error.
+
+#### Benefits
+
+1. **Better Orchestration**: Step Functions provides visual workflow execution history
+2. **User Notifications**: Email alerts eliminate need for constant UI monitoring
+3. **Error Handling**: Comprehensive Catch blocks with automatic status updates
+4. **Observability**: X-Ray tracing shows complete execution flow
+5. **Scalability**: Map state handles concurrent processing with configurable limits
+6. **Maintainability**: Workflow logic separated from Lambda code
+
+#### API Changes
+
+- **Removed**: POST `/submit`
+- **Added**: POST `/start-workflow` (Step Functions integration)
+- **Unchanged**: POST `/upload-url`, GET `/status/{job_id}`
+
+#### Deployment
+
+```bash
+cd /Users/kingsjam/git/ism-cpack-generator
+source .venv/bin/activate
+cdk deploy
+```
+
+#### Testing
+
+1. Navigate to https://d2noq38lnnxb2z.cloudfront.net
+2. Upload test JSON file (e.g., test_6_controls.json)
+3. Enter email address
+4. Submit and monitor real-time status
+5. First-time users: Confirm SNS subscription via email
+6. Receive completion notification email
+
+#### CloudWatch Observability
+
+- Step Functions execution history: View in AWS Console
+- Lambda logs: `/aws/lambda/PdfUploadSystemStack-*`
+- X-Ray traces: Complete workflow visualization
+
+#### Cost Impact
+
+- Step Functions: ~$0.001 per execution (10 state transitions)
+- SNS: ~$0.00002 per email notification
+- Additional Lambda: Minimal (simple operations)
+- Total additional cost: <$0.01 per upload (still dominated by Bedrock ~$15-20)
+
+#### Known Limitations
+
+- SNS subscription confirmation required on first use (inherent to SNS)
+- 30-minute Step Functions timeout (configurable, sufficient for 992 controls)
+- Map state concurrency: 100 (adjustable, sufficient for typical workloads)
+
 ## Current Status
 
-**✅ FULLY OPERATIONAL - BEDROCK-ENHANCED ARCHITECTURE**
+**✅ FULLY OPERATIONAL - STEP FUNCTIONS + BEDROCK ARCHITECTURE**
 
-System successfully processes ISM catalog JSON files, recursively extracts controls, dispatches them to parallel Lambda functions for storage in DynamoDB, and automatically maps each control to relevant AWS Config Rules using Amazon Bedrock (Claude Opus 4.5). Mappings are stored in a queryable DynamoDB table with GSI for efficient lookup by control ID.
+System successfully processes ISM catalog JSON files using AWS Step Functions for orchestration, recursively extracts controls, dispatches them to parallel Lambda functions for storage in DynamoDB, automatically maps each control to relevant AWS Config Rules using Amazon Bedrock (Claude Opus 4.5), and sends email notifications upon completion. Mappings are stored in a queryable DynamoDB table with GSI for efficient lookup by control ID.
 
 **Key Capabilities:**
-- Parallel control processing (992 controls processed concurrently)
+- Step Functions orchestration with visual workflow execution
+- Email notifications via Amazon SNS (success/failure)
+- Parallel control processing (992 controls processed concurrently via Map state)
 - Automated AWS Config Rules mapping via Bedrock
 - S3-based Config Rules distribution (single fetch, 992 reads)
 - Comprehensive mapping coverage (direct and indirect relevance)
-- Cost: ~$15-20 per 992-control upload
+- X-Ray tracing for end-to-end observability
+- Cost: ~$15-20 per 992-control upload (Bedrock dominates)
 
-**Last Updated**: 2026-02-09
-**Version**: 5.0 (Bedrock Integration)
+**Last Updated**: 2026-02-11
+**Version**: 6.0 (Step Functions Orchestration + Email Notifications)
