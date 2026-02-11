@@ -950,6 +950,73 @@ cdk deploy
 - 30-minute Step Functions timeout (configurable, sufficient for 992 controls)
 - Map state concurrency: 100 (adjustable, sufficient for typical workloads)
 
+## Standalone Conformance Pack Generator (Version 6.1)
+
+### Recovery of Offline Conformance Pack Generation Tool
+
+**Date**: 2026-02-11
+
+Recovered standalone conformance pack generator tool from commit 0c56c65. This tool enables offline generation of AWS Config Conformance Packs from DynamoDB Config Rules mappings without needing to upload JSON files through the web interface.
+
+#### Recovered Files
+
+1. **[generate_conformance_packs.py](generate_conformance_packs.py)** (605 lines)
+   - Standalone Python script for conformance pack generation
+   - Reads Config Rules mappings from DynamoDB
+   - Uses Amazon Bedrock (Claude Opus 4.5) for intelligent pack generation
+   - Outputs deployable AWS Config Conformance Pack YAML files
+   - Supports filtering by control ID, class, or title
+
+2. **[CONFORMANCE_PACK_GENERATOR_README.md](CONFORMANCE_PACK_GENERATOR_README.md)** (264 lines)
+   - Complete documentation for conformance pack generator
+   - Usage instructions and examples
+   - Input/output format specifications
+   - Deployment instructions for AWS Config
+
+3. **[conformance-pack-requirements.txt](conformance-pack-requirements.txt)** (3 lines)
+   - Python dependencies: boto3, PyYAML, botocore
+   - For running generator script locally
+
+4. **[test_deploy.sh](test_deploy.sh)** (48 lines)
+   - Shell script for testing conformance pack deployment
+   - Validates generated YAML syntax
+   - Uploads to S3 and deploys to AWS Config
+   - Monitors deployment status
+
+#### Use Cases
+
+- **Offline Pack Generation**: Generate conformance packs without re-uploading JSON
+- **Batch Processing**: Create multiple packs for different control subsets
+- **Custom Filtering**: Generate packs for specific control classes (e.g., only "ISM-0001" through "ISM-0100")
+- **Testing & Validation**: Validate generated packs before deployment
+- **Archive & Version Control**: Store generated packs in git for audit trails
+
+#### Integration with Main System
+
+- **Prerequisite**: Web interface must be used first to populate DynamoDB with Config Rules mappings
+- **Data Source**: Reads from `control-config-rules-mappings` DynamoDB table
+- **Independence**: Runs independently of Step Functions workflow
+- **Output**: Generates deployable conformance packs in `output/` directory
+
+#### Example Workflow
+
+```bash
+# 1. User uploads JSON via web interface (populates DynamoDB)
+# 2. Wait for Step Functions workflow to complete
+# 3. Run standalone generator offline
+python3 generate_conformance_packs.py --controls-table control-config-rules-mappings
+# 4. Deploy generated pack
+./test_deploy.sh output/conformance-pack-ism-controls.yaml
+```
+
+#### Benefits
+
+1. **Reproducibility**: Generate identical packs from same DynamoDB state
+2. **Flexibility**: Filter and customize packs without re-processing
+3. **Speed**: Faster than re-uploading JSON through web interface
+4. **Offline Capability**: Works without needing S3 uploads
+5. **Version Control**: Generated YAML can be committed to git
+
 ## Current Status
 
 **✅ FULLY OPERATIONAL - STEP FUNCTIONS + BEDROCK ARCHITECTURE**
@@ -967,4 +1034,4 @@ System successfully processes ISM catalog JSON files using AWS Step Functions fo
 - Cost: ~$15-20 per 992-control upload (Bedrock dominates)
 
 **Last Updated**: 2026-02-11
-**Version**: 6.0 (Step Functions Orchestration + Email Notifications)
+**Version**: 6.1 (Step Functions + Standalone Conformance Pack Generator)
