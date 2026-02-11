@@ -153,10 +153,51 @@ class PdfUploadSystemStack(Stack):
             handler="send_notification.handler",
             code=lambda_.Code.from_asset("lambda"),
             environment={
-                "SNS_TOPIC_ARN": notifications_topic.topic_arn
+                "SNS_TOPIC_ARN": notifications_topic.topic_arn,
+                "OUTPUT_BUCKET_NAME": json_bucket.bucket_name
             },
             timeout=Duration.seconds(30),
             memory_size=256
+        )
+
+        # Conformance Pack Initializer Lambda - initializes conformance pack generation
+        conformance_pack_initializer_lambda = lambda_.Function(
+            self, "ConformancePackInitializerHandler",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="conformance_pack_initializer.lambda_handler",
+            code=lambda_.Code.from_asset("lambda"),
+            environment={
+                "CONFIG_MAPPINGS_TABLE_NAME": config_mappings_table.table_name,
+                "OUTPUT_BUCKET_NAME": json_bucket.bucket_name
+            },
+            timeout=Duration.seconds(60),
+            memory_size=512
+        )
+
+        # Conformance Pack Batch Processor Lambda - processes batches of Config Rules
+        conformance_pack_batch_processor_lambda = lambda_.Function(
+            self, "ConformancePackBatchProcessorHandler",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="conformance_pack_batch_processor.lambda_handler",
+            code=lambda_.Code.from_asset("lambda"),
+            environment={
+                "OUTPUT_BUCKET_NAME": json_bucket.bucket_name
+            },
+            timeout=Duration.seconds(300),  # 5 minutes for batch processing
+            memory_size=1024
+        )
+
+        # Conformance Pack Aggregator Lambda - aggregates batch results and generates YAML
+        conformance_pack_aggregator_lambda = lambda_.Function(
+            self, "ConformancePackAggregatorHandler",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="conformance_pack_aggregator.lambda_handler",
+            code=lambda_.Code.from_asset("lambda"),
+            environment={
+                "OUTPUT_BUCKET_NAME": json_bucket.bucket_name
+            },
+            timeout=Duration.seconds(120),  # 2 minutes
+            memory_size=512
         )
 
         # Grant control processor Lambda permissions to DynamoDB
@@ -202,6 +243,26 @@ class PdfUploadSystemStack(Stack):
                 resources=[notifications_topic.topic_arn]
             )
         )
+        json_bucket.grant_read(send_notification_lambda)
+
+        # Grant conformance_pack_initializer Lambda permissions
+        config_mappings_table.grant_read_data(conformance_pack_initializer_lambda)
+        json_bucket.grant_read_write(conformance_pack_initializer_lambda)
+
+        # Grant conformance_pack_batch_processor Lambda permissions
+        json_bucket.grant_read_write(conformance_pack_batch_processor_lambda)
+        conformance_pack_batch_processor_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=['bedrock:InvokeModel'],
+                resources=[
+                    f'arn:aws:bedrock:ap-southeast-2:{self.account}:inference-profile/global.anthropic.claude-opus-4-5-20251101-v1:0',
+                    'arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-4-5-20251101-v1:0'
+                ]
+            )
+        )
+
+        # Grant conformance_pack_aggregator Lambda permissions
+        json_bucket.grant_read_write(conformance_pack_aggregator_lambda)
 
         # Step Functions State Machine
         # Load workflow definition from file
@@ -217,6 +278,12 @@ class PdfUploadSystemStack(Stack):
             '${ControlProcessorLambdaArn}', control_processor_lambda.function_arn
         ).replace(
             '${SendNotificationLambdaArn}', send_notification_lambda.function_arn
+        ).replace(
+            '${ConformancePackInitializerLambdaArn}', conformance_pack_initializer_lambda.function_arn
+        ).replace(
+            '${ConformancePackBatchProcessorLambdaArn}', conformance_pack_batch_processor_lambda.function_arn
+        ).replace(
+            '${ConformancePackAggregatorLambdaArn}', conformance_pack_aggregator_lambda.function_arn
         ).replace(
             '${BucketName}', json_bucket.bucket_name
         ).replace(
@@ -237,6 +304,9 @@ class PdfUploadSystemStack(Stack):
         process_json_lambda.grant_invoke(control_processor_state_machine)
         control_processor_lambda.grant_invoke(control_processor_state_machine)
         send_notification_lambda.grant_invoke(control_processor_state_machine)
+        conformance_pack_initializer_lambda.grant_invoke(control_processor_state_machine)
+        conformance_pack_batch_processor_lambda.grant_invoke(control_processor_state_machine)
+        conformance_pack_aggregator_lambda.grant_invoke(control_processor_state_machine)
 
         # Grant state machine permissions to update DynamoDB
         control_processor_state_machine.add_to_role_policy(
@@ -408,6 +478,9 @@ class PdfUploadSystemStack(Stack):
         CfnOutput(self, "ConfigMappingsTableName", value=config_mappings_table.table_name, description="DynamoDB Config Mappings Table Name")
         CfnOutput(self, "StateMachineArn", value=control_processor_state_machine.state_machine_arn, description="Control Processor State Machine ARN")
         CfnOutput(self, "SNSTopicArn", value=notifications_topic.topic_arn, description="SNS Topic for Notifications")
+        CfnOutput(self, "ConformancePackInitializerFunctionName", value=conformance_pack_initializer_lambda.function_name, description="Conformance Pack Initializer Lambda Function Name")
+        CfnOutput(self, "ConformancePackBatchProcessorFunctionName", value=conformance_pack_batch_processor_lambda.function_name, description="Conformance Pack Batch Processor Lambda Function Name")
+        CfnOutput(self, "ConformancePackAggregatorFunctionName", value=conformance_pack_aggregator_lambda.function_name, description="Conformance Pack Aggregator Lambda Function Name")
 
     def _inject_api_url(self, file_path: str, api_url: str) -> str:
         """Read HTML file and inject API URL"""

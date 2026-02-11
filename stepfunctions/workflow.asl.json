@@ -73,6 +73,64 @@
         }
       },
       "ResultPath": "$.updateResult",
+      "Next": "InitializeConformancePacks"
+    },
+    "InitializeConformancePacks": {
+      "Type": "Task",
+      "Resource": "${ConformancePackInitializerLambdaArn}",
+      "Parameters": {
+        "job_id.$": "$.jobDetails.job_id",
+        "prefix": "ism-controls",
+        "batch_size": 50
+      },
+      "ResultPath": "$.conformancePackInit",
+      "Catch": [{
+        "ErrorEquals": ["States.ALL"],
+        "ResultPath": "$.conformancePackError",
+        "Next": "SendSuccessNotification"
+      }],
+      "Next": "ProcessConformancePackBatches"
+    },
+    "ProcessConformancePackBatches": {
+      "Type": "Map",
+      "ItemsPath": "$.conformancePackInit.batches",
+      "MaxConcurrency": 10,
+      "Parameters": {
+        "job_id.$": "$.conformancePackInit.job_id",
+        "batch_id.$": "$$.Map.Item.Value.batch_id",
+        "docs_s3_key.$": "$.conformancePackInit.docs_s3_key",
+        "rules.$": "$$.Map.Item.Value.rules"
+      },
+      "Iterator": {
+        "StartAt": "ProcessSingleBatch",
+        "States": {
+          "ProcessSingleBatch": {
+            "Type": "Task",
+            "Resource": "${ConformancePackBatchProcessorLambdaArn}",
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.batchResults",
+      "Catch": [{
+        "ErrorEquals": ["States.ALL"],
+        "ResultPath": "$.conformancePackError",
+        "Next": "SendSuccessNotification"
+      }],
+      "Next": "AggregateConformancePacks"
+    },
+    "AggregateConformancePacks": {
+      "Type": "Task",
+      "Resource": "${ConformancePackAggregatorLambdaArn}",
+      "Parameters": {
+        "initResult.$": "$.conformancePackInit"
+      },
+      "ResultPath": "$.conformancePackResult",
+      "Catch": [{
+        "ErrorEquals": ["States.ALL"],
+        "ResultPath": "$.conformancePackError",
+        "Next": "SendSuccessNotification"
+      }],
       "Next": "SendSuccessNotification"
     },
     "UpdateJobFailed": {
@@ -102,7 +160,9 @@
       "Parameters": {
         "email.$": "$.jobDetails.email",
         "subject": "ISM Control Processing Complete",
-        "message.$": "States.Format('Success! Processed {} controls from file: {}', $.processingResult.controls_count, $.jobDetails.filename)"
+        "message.$": "States.Format('Success! Processed {} controls from file: {}', $.processingResult.controls_count, $.jobDetails.filename)",
+        "conformancePackResult.$": "$.conformancePackResult",
+        "bucket_name": "${BucketName}"
       },
       "End": true
     },
