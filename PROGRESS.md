@@ -1019,19 +1019,22 @@ python3 generate_conformance_packs.py --controls-table control-config-rules-mapp
 
 ## Current Status
 
-**✅ FULLY OPERATIONAL - STEP FUNCTIONS + BEDROCK ARCHITECTURE**
+**✅ FULLY OPERATIONAL - INTEGRATED CONFORMANCE PACK GENERATION**
 
-System successfully processes ISM catalog JSON files using AWS Step Functions for orchestration, recursively extracts controls, dispatches them to parallel Lambda functions for storage in DynamoDB, automatically maps each control to relevant AWS Config Rules using Amazon Bedrock (Claude Opus 4.5), and sends email notifications upon completion. Mappings are stored in a queryable DynamoDB table with GSI for efficient lookup by control ID.
+System successfully processes ISM catalog JSON files using AWS Step Functions for orchestration, recursively extracts controls, dispatches them to parallel Lambda functions for storage in DynamoDB, automatically maps each control to relevant AWS Config Rules using Amazon Bedrock (Claude Opus 4.5), generates deployment-ready AWS Config Conformance Pack YAML files, and sends email notifications with presigned download URLs upon completion.
 
 **Key Capabilities:**
-- Step Functions orchestration with visual workflow execution
-- Email notifications via Amazon SNS (success/failure)
+- Step Functions orchestration with visual workflow execution (10 states)
+- Email notifications via Amazon SNS with presigned YAML download URLs
 - Parallel control processing (992 controls processed concurrently via Map state)
 - Automated AWS Config Rules mapping via Bedrock
+- **NEW: Automated conformance pack generation with fan-out architecture**
+- **NEW: Deployment-ready YAML files uploaded to S3**
+- **NEW: 7-day presigned URLs in email notifications**
 - S3-based Config Rules distribution (single fetch, 992 reads)
 - Comprehensive mapping coverage (direct and indirect relevance)
 - X-Ray tracing for end-to-end observability
-- Cost: ~$15-20 per 992-control upload (Bedrock dominates)
+- Cost: ~$17-25 per 992-control upload (control processing $15-20 + pack gen $2-5)
 
 **Last Updated**: 2026-02-12
 **Version**: 7.0 (Integrated Conformance Pack Generation in Step Functions)
