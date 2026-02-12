@@ -14,6 +14,23 @@
         "execution_arn.$": "$$.Execution.Name"
       },
       "ResultPath": "$.jobDetails",
+      "Next": "UpdateProgressProcessingJSON"
+    },
+    "UpdateProgressProcessingJSON": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "job_id": {"S.$": "$.jobDetails.job_id"}
+        },
+        "UpdateExpression": "SET current_step = :step, progress_percentage = :progress",
+        "ExpressionAttributeValues": {
+          ":step": {"S": "Processing JSON file"},
+          ":progress": {"N": "10"}
+        }
+      },
+      "ResultPath": null,
       "Next": "ProcessJSON"
     },
     "ProcessJSON": {
@@ -30,6 +47,24 @@
         "ResultPath": "$.error",
         "Next": "UpdateJobFailed"
       }],
+      "Next": "UpdateProgressProcessingControls"
+    },
+    "UpdateProgressProcessingControls": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "job_id": {"S.$": "$.jobDetails.job_id"}
+        },
+        "UpdateExpression": "SET current_step = :step, progress_percentage = :progress, total_controls = :total",
+        "ExpressionAttributeValues": {
+          ":step": {"S": "Processing controls with AI"},
+          ":progress": {"N": "20"},
+          ":total": {"N.$": "States.JsonToString($.processingResult.controls_count)"}
+        }
+      },
+      "ResultPath": null,
       "Next": "ProcessControls"
     },
     "ProcessControls": {
@@ -62,14 +97,15 @@
         "Key": {
           "job_id": {"S.$": "$.jobDetails.job_id"}
         },
-        "UpdateExpression": "SET #status = :status, controls_dispatched = :count, completed_at = :completed",
+        "UpdateExpression": "SET #status = :status, controls_dispatched = :count, current_step = :step, progress_percentage = :progress",
         "ExpressionAttributeNames": {
           "#status": "status"
         },
         "ExpressionAttributeValues": {
-          ":status": {"S": "completed"},
+          ":status": {"S": "processing"},
           ":count": {"N.$": "States.JsonToString($.processingResult.controls_count)"},
-          ":completed": {"S.$": "$$.State.EnteredTime"}
+          ":step": {"S": "Initializing conformance packs"},
+          ":progress": {"N": "50"}
         }
       },
       "ResultPath": "$.updateResult",
@@ -89,6 +125,23 @@
         "ResultPath": "$.conformancePackError",
         "Next": "SendSuccessNotification"
       }],
+      "Next": "UpdateProgressProcessingBatches"
+    },
+    "UpdateProgressProcessingBatches": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "job_id": {"S.$": "$.jobDetails.job_id"}
+        },
+        "UpdateExpression": "SET current_step = :step, progress_percentage = :progress",
+        "ExpressionAttributeValues": {
+          ":step": {"S": "Processing conformance pack batches"},
+          ":progress": {"N": "60"}
+        }
+      },
+      "ResultPath": null,
       "Next": "ProcessConformancePackBatches"
     },
     "ProcessConformancePackBatches": {
@@ -117,6 +170,23 @@
         "ResultPath": "$.conformancePackError",
         "Next": "SendSuccessNotification"
       }],
+      "Next": "UpdateProgressAggregating"
+    },
+    "UpdateProgressAggregating": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "job_id": {"S.$": "$.jobDetails.job_id"}
+        },
+        "UpdateExpression": "SET current_step = :step, progress_percentage = :progress",
+        "ExpressionAttributeValues": {
+          ":step": {"S": "Generating YAML files and HTML report"},
+          ":progress": {"N": "80"}
+        }
+      },
+      "ResultPath": null,
       "Next": "AggregateConformancePacks"
     },
     "AggregateConformancePacks": {
@@ -129,8 +199,25 @@
       "Catch": [{
         "ErrorEquals": ["States.ALL"],
         "ResultPath": "$.conformancePackError",
-        "Next": "SendSuccessNotification"
+        "Next": "UpdateProgressSendingNotification"
       }],
+      "Next": "UpdateProgressSendingNotification"
+    },
+    "UpdateProgressSendingNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "job_id": {"S.$": "$.jobDetails.job_id"}
+        },
+        "UpdateExpression": "SET current_step = :step, progress_percentage = :progress",
+        "ExpressionAttributeValues": {
+          ":step": {"S": "Sending notification"},
+          ":progress": {"N": "90"}
+        }
+      },
+      "ResultPath": null,
       "Next": "SendSuccessNotification"
     },
     "UpdateJobFailed": {
@@ -141,14 +228,15 @@
         "Key": {
           "job_id": {"S.$": "$.jobDetails.job_id"}
         },
-        "UpdateExpression": "SET #status = :status, error_message = :error, failed_at = :failed",
+        "UpdateExpression": "SET #status = :status, error_message = :error, failed_at = :failed, current_step = :step",
         "ExpressionAttributeNames": {
           "#status": "status"
         },
         "ExpressionAttributeValues": {
           ":status": {"S": "failed"},
           ":error": {"S.$": "$.error.Cause"},
-          ":failed": {"S.$": "$$.State.EnteredTime"}
+          ":failed": {"S.$": "$$.State.EnteredTime"},
+          ":step": {"S": "Failed"}
         }
       },
       "ResultPath": "$.updateResult",
@@ -163,6 +251,28 @@
         "message.$": "States.Format('Success! Processed {} controls from file: {}', $.processingResult.controls_count, $.jobDetails.filename)",
         "conformancePackResult.$": "$.conformancePackResult",
         "bucket_name": "${BucketName}"
+      },
+      "ResultPath": "$.notificationResult",
+      "Next": "MarkJobCompleted"
+    },
+    "MarkJobCompleted": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JobsTableName}",
+        "Key": {
+          "job_id": {"S.$": "$.jobDetails.job_id"}
+        },
+        "UpdateExpression": "SET #status = :status, current_step = :step, progress_percentage = :progress, completed_at = :completed",
+        "ExpressionAttributeNames": {
+          "#status": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {"S": "completed"},
+          ":step": {"S": "Completed"},
+          ":progress": {"N": "100"},
+          ":completed": {"S.$": "$$.State.EnteredTime"}
+        }
       },
       "End": true
     },

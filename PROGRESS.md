@@ -1,7 +1,7 @@
 # ISM Controls Upload System - Quick Reference
 
-## Current Status (Version 7.2)
-**✅ FULLY OPERATIONAL** - Automated ISM control processing with conformance pack generation, HTML mappings report, and styled email notifications
+## Current Status (Version 7.3)
+**✅ FULLY OPERATIONAL** - Automated ISM control processing with conformance pack generation, HTML mappings report, styled email notifications, and real-time progress tracking
 
 **Last Updated**: 2026-02-12
 
@@ -13,6 +13,7 @@ Serverless system that processes ISM catalog JSON files:
 4. Generate AWS Config Conformance Pack YAML files
 5. Generate interactive HTML control mappings report
 6. Email presigned download URLs (7-day validity)
+7. Real-time progress tracking with animated progress bar (10% → 100%)
 
 **Performance**: ~60-90 seconds for 992 controls
 **Cost**: ~$17-25 per upload ($15-20 control processing + $2-5 pack generation)
@@ -22,19 +23,24 @@ Serverless system that processes ISM catalog JSON files:
 **Frontend**: https://d2noq38lnnxb2z.cloudfront.net (CloudFront + S3)
 - Default URL: AWS Config managed rules documentation
 - Consistent styling across all input fields
+- Real-time progress bar with status updates
 
-**Step Functions Workflow** (10 states):
+**Step Functions Workflow** (16 states with progress tracking):
 ```
-1. CreateJob → 2. ProcessJSON → 3. ProcessControls (Map, concurrency=100)
-→ 4. UpdateJobCompleted → 5. InitializeConformancePacks
-→ 6. ProcessConformancePackBatches (Map, concurrency=10)
-→ 7. AggregateConformancePacks → 8. SendSuccessNotification
+1. CreateJob → 2. UpdateProgressProcessingJSON (10%)
+→ 3. ProcessJSON → 4. UpdateProgressProcessingControls (20%)
+→ 5. ProcessControls (Map, concurrency=100) → 6. UpdateJobCompleted (50%)
+→ 7. InitializeConformancePacks → 8. UpdateProgressProcessingBatches (60%)
+→ 9. ProcessConformancePackBatches (Map, concurrency=10)
+→ 10. UpdateProgressAggregating (80%) → 11. AggregateConformancePacks
+→ 12. UpdateProgressSendingNotification (90%) → 13. SendSuccessNotification
+→ 14. MarkJobCompleted (100%)
 ```
 
 **API Endpoints**:
 - POST `/upload-url` - Generate presigned S3 URL
 - POST `/start-workflow` - Trigger Step Functions workflow
-- GET `/status/{job_id}` - Get job status
+- GET `/status/{job_id}` - Get job status with progress (current_step, progress_percentage, total_controls)
 
 **Lambda Functions**:
 - JsonUploadHandler: Generate presigned URLs, status queries
@@ -78,7 +84,8 @@ Serverless system that processes ISM catalog JSON files:
 ```
 Primary Key: job_id (String)
 Attributes: status, filename, s3_key, email, execution_arn, created_at,
-            completed_at, controls_dispatched, error_message, ttl (24h)
+            completed_at, controls_dispatched, error_message, ttl (24h),
+            current_step, progress_percentage, total_controls
 ```
 
 **Controls Table**:
@@ -278,15 +285,29 @@ s3_client = boto3.client('s3', config=s3_config)
 - Requires verified sender email/domain in SES
 - SES production access enabled (can send to any email)
 
+**Real-time Progress Tracking**:
+- Animated progress bar in frontend UI showing 0-100% completion
+- Step Functions updates DynamoDB with progress at each major stage:
+  - 10%: Processing JSON file
+  - 20%: Processing controls with AI
+  - 50%: Initializing conformance packs
+  - 60%: Processing conformance pack batches
+  - 80%: Generating YAML files and HTML report
+  - 90%: Sending notification
+  - 100%: Completed
+- Frontend polls status endpoint every 3 seconds (6-minute timeout)
+- Displays current step description and percentage
+- Progress data stored in Jobs table: `current_step`, `progress_percentage`, `total_controls`
+- Uses native Step Functions DynamoDB integration (no additional Lambdas)
+
 ## Known Limitations
 
 1. **Lambda Concurrency**: Default 1000 concurrent executions (can request increase)
 2. **Step Functions Timeout**: 30 minutes (sufficient for current workloads)
 3. **File Size**: 10MB frontend limit
 4. **No Authentication**: Public access (add Cognito for production)
-5. **No Completion Tracking**: Job marked "completed" after dispatch, not after all processors finish
-6. **No Retry Logic**: Failed processors not automatically retried (consider DLQ)
-7. **SES Sender Verification**: Requires verified sender email/domain in SES (currently using verified domain)
+5. **No Retry Logic**: Failed processors not automatically retried (consider DLQ)
+6. **SES Sender Verification**: Requires verified sender email/domain in SES (currently using verified domain)
 
 ## Standalone Conformance Pack Generator
 
@@ -312,7 +333,8 @@ Benefits: Reproducibility, filtering, offline capability, version control
 - **v6.1** (2026-02-11): Recovered standalone conformance pack generator
 - **v7.0** (2026-02-12): Integrated conformance pack generation into Step Functions workflow
 - **v7.1** (2026-02-12): Added interactive HTML control mappings report with search functionality
-- **v7.2** (2026-02-12): **Current** - Migrated to SES for styled HTML email notifications with gradient headers, professional buttons, and responsive design
+- **v7.2** (2026-02-12): Migrated to SES for styled HTML email notifications with gradient headers, professional buttons, and responsive design
+- **v7.3** (2026-02-12): **Current** - Added real-time progress tracking with animated progress bar showing 6 workflow stages (10% → 100%)
 
 ## CloudWatch Observability
 

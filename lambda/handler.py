@@ -160,8 +160,14 @@ def get_job_status(event, headers):
             'job_id': job_id,
             'status': status,
             'filename': job.get('filename', ''),
-            'created_at': job.get('created_at', '')
+            'created_at': job.get('created_at', ''),
+            'current_step': job.get('current_step', 'Starting...'),
+            'progress_percentage': decimal_to_number(job.get('progress_percentage', 0))
         }
+
+        # Add optional fields
+        if 'total_controls' in job:
+            result['total_controls'] = decimal_to_number(job.get('total_controls', 0))
 
         if status == 'completed':
             result['controls_dispatched'] = decimal_to_number(job.get('controls_dispatched', 0))
@@ -172,6 +178,7 @@ def get_job_status(event, headers):
             result['failed_at'] = job.get('failed_at', '')
         elif status == 'processing':
             result['message'] = 'In Progress...'
+            result['controls_dispatched'] = decimal_to_number(job.get('controls_dispatched', 0))
 
         return {
             'statusCode': 200,
