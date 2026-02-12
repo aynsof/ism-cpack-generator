@@ -1,7 +1,7 @@
 # ISM Controls Upload System - Quick Reference
 
-## Current Status (Version 7.1)
-**✅ FULLY OPERATIONAL** - Automated ISM control processing with conformance pack generation and HTML mappings report
+## Current Status (Version 7.2)
+**✅ FULLY OPERATIONAL** - Automated ISM control processing with conformance pack generation, HTML mappings report, and styled email notifications
 
 **Last Updated**: 2026-02-12
 
@@ -44,7 +44,7 @@ Serverless system that processes ISM catalog JSON files:
 - ConformancePackInitializerHandler: Initialize pack generation (60s, 512MB)
 - ConformancePackBatchProcessorHandler: Process Config Rules batches (300s, 1024MB)
 - ConformancePackAggregatorHandler: Generate YAML files + HTML mappings report (120s, 512MB)
-- SendNotificationHandler: SNS email with presigned URLs for YAML + HTML (30s, 256MB)
+- SendNotificationHandler: SES styled HTML emails with presigned URLs for YAML + HTML (30s, 256MB) - Falls back to SNS if SES fails
 
 **DynamoDB Tables**:
 - JobsTable: Track processing jobs (TTL 24h)
@@ -52,7 +52,8 @@ Serverless system that processes ISM catalog JSON files:
 - ConfigMappingsTable: Store control→Config Rule mappings (GSI on control_id)
 
 **Other Services**:
-- SNS: Email notifications (topic: `ism-control-processing-notifications`)
+- SES: Styled HTML email notifications (sender: `noreply@kingsjam147655097661.email.connect.aws`)
+- SNS: Fallback email notifications (topic: `ism-control-processing-notifications`)
 - S3: JSON storage, Config Rules docs, YAML outputs
 - Bedrock: Claude Opus 4.5 via `global.anthropic.claude-opus-4-5-20251101-v1:0`
 
@@ -262,6 +263,21 @@ s3_client = boto3.client('s3', config=s3_config)
 - Uploaded to S3 at `conformance-packs/{job_id}/control-mappings-report.html`
 - Presigned URL (7-day validity) included in email notification
 
+**Styled HTML Email Notifications**:
+- Professional HTML emails sent via Amazon SES (with plain text fallback)
+- Features:
+  - Gradient header (blue) with "Processing Complete" title
+  - Conformance packs section (purple gradient) with styled download buttons
+  - HTML mappings report section (green gradient) with feature list
+  - Color-coded info boxes (yellow for validity, blue for new subscribers)
+  - Clean typography with system fonts
+  - Responsive design (mobile and desktop)
+  - Plain text fallback for older email clients
+- Falls back to SNS for plain text if SES fails
+- Sender: `noreply@kingsjam147655097661.email.connect.aws`
+- Requires verified sender email/domain in SES
+- SES production access enabled (can send to any email)
+
 ## Known Limitations
 
 1. **Lambda Concurrency**: Default 1000 concurrent executions (can request increase)
@@ -269,8 +285,8 @@ s3_client = boto3.client('s3', config=s3_config)
 3. **File Size**: 10MB frontend limit
 4. **No Authentication**: Public access (add Cognito for production)
 5. **No Completion Tracking**: Job marked "completed" after dispatch, not after all processors finish
-6. **SNS Confirmation**: First-time email users must confirm subscription
-7. **No Retry Logic**: Failed processors not automatically retried (consider DLQ)
+6. **No Retry Logic**: Failed processors not automatically retried (consider DLQ)
+7. **SES Sender Verification**: Requires verified sender email/domain in SES (currently using verified domain)
 
 ## Standalone Conformance Pack Generator
 
@@ -295,7 +311,8 @@ Benefits: Reproducibility, filtering, offline capability, version control
 - **v6.0** (2026-02-11): Migrated to Step Functions orchestration, added SNS notifications
 - **v6.1** (2026-02-11): Recovered standalone conformance pack generator
 - **v7.0** (2026-02-12): Integrated conformance pack generation into Step Functions workflow
-- **v7.1** (2026-02-12): **Current** - Added interactive HTML control mappings report with search functionality
+- **v7.1** (2026-02-12): Added interactive HTML control mappings report with search functionality
+- **v7.2** (2026-02-12): **Current** - Migrated to SES for styled HTML email notifications with gradient headers, professional buttons, and responsive design
 
 ## CloudWatch Observability
 
@@ -319,6 +336,7 @@ Benefits: Reproducibility, filtering, offline capability, version control
 - Initializer: "Found N unique Config Rules across M controls"
 - Batch Processor: "Processing batch {id} with {count} rules"
 - Aggregator: "Generated {count} conformance pack files" → "Generating HTML control mappings report..." → "✓ Found N control mappings"
+- Notification Handler: "Sent HTML email via SES, MessageId: {id}" (or "Falling back to SNS" if SES fails)
 
 ## Future Enhancements
 

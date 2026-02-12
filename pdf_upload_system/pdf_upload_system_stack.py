@@ -154,7 +154,8 @@ class PdfUploadSystemStack(Stack):
             code=lambda_.Code.from_asset("lambda"),
             environment={
                 "SNS_TOPIC_ARN": notifications_topic.topic_arn,
-                "OUTPUT_BUCKET_NAME": json_bucket.bucket_name
+                "OUTPUT_BUCKET_NAME": json_bucket.bucket_name,
+                "SENDER_EMAIL": "noreply@kingsjam147655097661.email.connect.aws"  # Email from verified domain
             },
             timeout=Duration.seconds(30),
             memory_size=256
@@ -242,6 +243,13 @@ class PdfUploadSystemStack(Stack):
             iam.PolicyStatement(
                 actions=['sns:Subscribe', 'sns:ListSubscriptionsByTopic'],
                 resources=[notifications_topic.topic_arn]
+            )
+        )
+        # Grant SES permissions for sending HTML emails
+        send_notification_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=['ses:SendEmail', 'ses:SendRawEmail'],
+                resources=['*']  # SES doesn't support resource-level permissions for SendEmail
             )
         )
         json_bucket.grant_read(send_notification_lambda)
